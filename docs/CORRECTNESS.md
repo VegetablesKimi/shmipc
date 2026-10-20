@@ -262,8 +262,35 @@ The guarantee MPSC does give is the relaxed spec: FIFO in claim order, and "empt
 
 **The checker found a bug in my first relaxed spec.** It only accepted "empty" while some *not-yet-linearised* enqueue overlapped the dequeue. But the slow enqueue is dequeued first, so it has to be linearised early. Correct MPSC histories were then rejected. The real-time-overlap version is pinned by the regression test `RelaxedEmptyCountsRealTimeOverlapNotLinearisationOrder`.
 
+## 5c. Exhaustive model checking (GenMC)
+
+Stress testing cannot settle an ordering that hardware rarely or never reorders. GenMC can: it enumerates **every** execution a memory model allows, for small bounded versions of each protocol (`tests/model`, [README](../tests/model/README.md)). Each site is weakened in turn, exactly as in §5, under three configurations. Full table: [results/genmc.md](results/genmc.md). Run on every relevant push by the `model-check` workflow.
+
+| site | stress, 4 machines (§5) | RC11, plain data | RC11, atomic data | IMM (hardware) |
+|---|---|---|---|---|
+| *all correct models* | — | ok | ok | ok |
+| `spsc.publish` / `consume` | caught on Arm | race | assert | assert |
+| **`spsc.release`** | **never caught** | **race** | ok | **assert** |
+| **`spsc.reclaim`** | **never caught** | **race** | ok | ok |
+| `bcast.*` (4 sites) | caught on Arm | assert | assert | assert |
+| `seqlock.*` (4 sites) | caught on Arm (M4) | assert | assert | assert |
+| `mpsc.commit` / `consume` | caught on Arm | race | assert | assert |
+| **`mpsc.release` / `reclaim` / `headcache`** | **never caught** | **race** | **assert** | **assert** |
+| `doorbell.notify` | caught everywhere | assert | assert | assert |
+| `doorbell.wait` | caught on Arm | assert | assert | assert |
+
+The correct models explored 9 (SPSC), 45 (broadcast), 196 (seqlock), 42 (MPSC) and 4 (doorbell) complete executions without an error. Every one of the 21 weakened variants fails in at least one configuration.
+
+**What this settles that stress testing could not.**
+
+1. **Every acquire/release in the library is load-bearing, under the C++ model.** All five load→store edges that no machine ever caught are data races (undefined behaviour) when weakened.
+2. **`spsc.release` is a real hardware bug, not only a language-lawyer one.** RC11 forbids load buffering, so with atomic payloads RC11 accepts the weakened code. IMM, which allows load buffering as Arm does, finds an execution where the consumer reads a value the producer wrote *after* the consumer's read. The stress tests' silence was a property of the CPUs tested, not of the code.
+3. **`spsc.reclaim` is protected on hardware by an accident.** The producer only writes the slot after `if (full) return`, a control dependency, and IMM (like Arm) does not reorder a load with a control-dependent store. C++ gives no such guarantee: compilers may transform branches. So the acquire stays.
+4. **The MPSC space-reclamation edges fail even under RC11 with atomic data.** In the counterexample the consumer's zeroing store is ordered after a producer's new record (nothing orders them), and erases it. This is exactly the "late zero" scenario footnoted in §5, which stress could not reach because reuse waits a whole ring lap.
+
 ## 6. Limits of this evidence
 
-- **Stress testing can only show the presence of bugs.** A row in §5 with no failure within the budget means the reordering was not observed on that CPU in that time. It does not mean the weaker order is correct. The C++ model permits the failure, and a different CPU, compiler or load may produce it. This is why exhaustive model checking (MS6) follows.
+- **Stress testing can only show the presence of bugs.** A row in §5 with no failure within the budget means the reordering was not observed on that CPU in that time. §5c then showed that every such row hides a real bug.
+- **Model checking is exhaustive only within the model's bounds** (2 slots, 2–3 messages, 2–3 threads), and the models are hand-written mirrors of the C++ code, not the code itself (tests/model/README.md, "Fidelity").
 - **The TSO control is Apple's TSO mode, not an x86 core.** It shows what the *ordering model* does to these bugs. Real x86 timing and microarchitecture are a separate data point (the GitHub x86 runner).
 - **Single-machine results.** Apple's cores are not Neoverse cores. Graviton results would add a second weakly ordered data point.

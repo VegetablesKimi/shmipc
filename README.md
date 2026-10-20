@@ -2,11 +2,12 @@
 
 Low-latency inter-process messaging over shared memory, built for a trading stack. It provides SPSC, MPSC, and broadcast channels, handles crashed and slow peers, has memory-ordering arguments that are checked on aarch64, and backs its claims with reproducible benchmarks.
 
-> Status: milestone 5 of 7.
+> Status: milestone 6 of 7.
 > - **Done:** shared-memory segments; SPSC, MPSC, broadcast (1 writer, N readers, exact loss reporting) and seqlock channels; five wait strategies, including cross-process blocking with a lost-wakeup-free doorbell; unit, property and multi-process stress tests; benchmarks.
 > - **Done:** a memory-ordering bug-injection experiment on four machines: Apple M4, Neoverse-N2, M4 in TSO mode, and AMD EPYC ([CORRECTNESS.md](docs/CORRECTNESS.md) §5). Every acquire/release is weakened in turn, to check that the stress tests catch it. Weakly ordered cores catch up to 10 of the 12 sites; TSO cores catch none.
 > - **Done:** crash recovery. Endpoints register by process identity; a dead MPSC producer's half-written claim is unblocked; restarted SPSC endpoints resume. Chaos tests SIGKILL 10,000 processes per run, including at fault-injection points inside the claim protocol, with zero lost or corrupt records.
-> - **Not started:** model checking and linearizability (milestone 6).
+> - **Done:** exhaustive model checking with GenMC (RC11 and IMM). It confirms that every acquire/release is required, including the five that stress testing on four machines never caught. Wing–Gong linearizability checking: SPSC is linearizable as a strict FIFO queue; MPSC is linearizable only under a relaxed "empty" spec, by design.
+> - **Not started:** competitor benchmarks and example applications (milestone 7).
 > - **Documentation:** [design](docs/DESIGN.md), [correctness](docs/CORRECTNESS.md), [benchmarks](docs/BENCHMARKS.md) and [lessons](docs/LESSONS.md).
 
 First numbers on an Apple M4 (Linux VM, pinned, 64-byte messages). These are directional only; see the limitations in BENCHMARKS.md.
@@ -50,7 +51,9 @@ include/shmipc/fault/      participant liveness, fault-injection points
 src/                       non-template code
 tests/                     unit, property (RapidCheck), stress, fault (exact crash points), chaos (kill -9 loops)
 bench/                     harness (HdrHistogram, environment capture), cases, scripts
-tests/experiments/         ordering bug-injection experiment
+tests/experiments/         ordering bug-injection experiment, litmus tests
+tests/model/               GenMC models (C11) of every protocol
+tests/linearizability/     Wing–Gong checker and recorded-history tests
 docker/                    Linux dev image and run wrapper (PLATFORM=linux/amd64 for x86 via Rosetta)
 docs/                      design, correctness and benchmark write-ups
 ```
