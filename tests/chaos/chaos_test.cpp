@@ -263,8 +263,10 @@ TEST(SpscChaos, ConsumerKilledAndRestartedSeesNoGaps) {
   };
   spawn_consumer();
   while (kills < kills_target) {
-    // The producer keeps the ring as full as it can.
-    while (producer.try_push(next_seq)) ++next_seq;
+    // The producer keeps the ring as full as it can, in bounded bursts: if
+    // the consumer is faster than us, the ring never fills, and an unbounded
+    // loop would never get back to killing it.
+    for (int i = 0; i < 1024 && producer.try_push(next_seq); ++i) ++next_seq;
     if (monotonic_ns() >= child.kill_at_ns) {
       kill_and_reap(child);
       ++kills;
@@ -319,8 +321,11 @@ TEST(SpscChaos, ProducerKilledAndRestartedLosesAndDuplicatesNothing) {
   };
   spawn_producer();
   while (kills < kills_target) {
+    // Bounded burst: if the producer is faster than us (it was, on Neoverse
+    // under gcc + ASan), "pop until empty" never ends and the kill schedule
+    // never runs. The CI job then hung until its 900 s timeout.
     std::uint64_t v = 0;
-    while (consumer.try_pop(v)) {
+    for (int i = 0; i < 1024 && consumer.try_pop(v); ++i) {
       if (v != expected && bad++ == 0) {
         std::fprintf(stderr, "got %llu expected %llu\n", static_cast<unsigned long long>(v),
                      static_cast<unsigned long long>(expected));
