@@ -9,8 +9,8 @@ Lock-free code is wrong in ways that ordinary tests rarely hit. This document li
 | ThreadSanitizer on every concurrent test | data races, including on payload bytes | MS2–MS3 |
 | Stress on a weakly ordered CPU (Apple M4, aarch64) | reorderings that x86 TSO forbids | MS2–MS3 |
 | **Bug injection**: weaken one ordering, check the stress tests catch it | tests that pass for the wrong reason | **MS3** (§5) |
-| Exhaustive model checking (GenMC) | interleavings too rare for stress | MS6 |
-| Linearizability checking (Wing–Gong) | MPSC/SPSC histories | MS6 |
+| Exhaustive model checking (GenMC) | interleavings too rare for stress | **MS6** (§5c) |
+| Linearizability checking (Wing–Gong) | MPSC/SPSC histories | **MS6** (§5b) |
 
 ## 1. Conventions
 
@@ -242,6 +242,25 @@ Raw output: [Neoverse-N2](results/weaken-gha-neoverse-n2.md), [EPYC](results/wea
 1. **The pattern from MS3 repeats for MPSC, on both Arm cores.** Store→store and load→load edges (`commit`, `consume`) are caught at once. The space-reclamation edges (`release`, `reclaim`, `headcache`) are not: their failure needs either load buffering or a stale store surviving a full ring lap. They wait for model checking. Neither TSO machine catches anything here.
 2. **`doorbell.notify` fails on every machine, real x86 included.** It is the only site in the library whose weakening is visible on TSO. It guards a store→load order, and TSO's store buffer reorders exactly that. A Dekker-style handshake written with acquire/release would pass any test suite that never exercises the store buffer, and still lose wakeups in production, on x86 as much as on Arm.
 3. **`doorbell.wait` fails on both Arm cores and survives both TSO machines, and the reason is an accident.** On the waiter side the fence follows `waiters.fetch_add`. Under TSO (x86, and Apple's TSO mode) every atomic read-modify-write is a full barrier (`LOCK XADD`), so the RMW provides the order the deleted fence was meant to give. Arm's `LDADD` has no such side effect. C++ guarantees neither behaviour for a relaxed RMW, which is why the fence stays. Code tested only on x86 could depend on this accidental barrier without anyone knowing.
+
+## 5b. Linearizability (Wing–Gong)
+
+`tests/linearizability` records histories from real concurrent runs and checks them with the Wing–Gong search plus Lowe's memoisation (`wgl.hpp`).
+- Every operation takes an invocation and a response timestamp from one seq_cst counter, so the timestamps respect real time.
+- A history passes if some sequential order exists that respects real time and is legal for a FIFO queue.
+- The checker is validated first on hand-built linearizable and non-linearizable histories.
+
+| channel | spec | histories per run | violations |
+|---|---|---:|---:|
+| `SpscQueue` | strict FIFO | 3,000 | **0** |
+| `Mpsc` (3 producers) | strict FIFO | 3,000 | **1–6** |
+| `Mpsc` (3 producers) | relaxed empty | 3,000 | **0** |
+
+**MPSC is not linearizable as a strict FIFO queue, and this is by design.** An enqueue takes its position at the claim but becomes visible at its commit. While an early claim is unfinished, the consumer stops at it and reports "empty", even though later-claimed enqueues have already completed. A strict queue could not be empty at that moment.
+
+The guarantee MPSC does give is the relaxed spec: FIFO in claim order, and "empty" only while some enqueue is in progress in real time. Agrona's `ManyToOneRingBuffer` has the same property. Callers that need strict emptiness must not treat an empty `drain` as "no producer has anything to say".
+
+**The checker found a bug in my first relaxed spec.** It only accepted "empty" while some *not-yet-linearised* enqueue overlapped the dequeue. But the slow enqueue is dequeued first, so it has to be linearised early. Correct MPSC histories were then rejected. The real-time-overlap version is pinned by the regression test `RelaxedEmptyCountsRealTimeOverlapNotLinearisationOrder`.
 
 ## 6. Limits of this evidence
 

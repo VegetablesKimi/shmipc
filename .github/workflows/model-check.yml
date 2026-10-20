@@ -1,0 +1,47 @@
+name: model-check
+
+# Exhaustive model checking of the channel protocols with GenMC
+# (tests/model, docs/CORRECTNESS.md §5c). Fails if any CORRECT model reports
+# an error. The weakened variants are expected to fail and are only reported.
+on:
+  push:
+    paths: ["tests/model/**", "include/shmipc/channel/**", "include/shmipc/wait/**", ".github/workflows/model-check.yml"]
+  workflow_dispatch:
+
+env:
+  GENMC_COMMIT: 9f6c4c0772d0c42b325681581acc6a0f3eb9b5f7
+
+jobs:
+  genmc:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install LLVM 19
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y ninja-build g++-14 clang-19 llvm-19 llvm-19-dev libclang-19-dev \
+            libffi-dev zlib1g-dev libedit-dev libzstd-dev
+      - name: Cache GenMC build
+        id: cache
+        uses: actions/cache@v4
+        with:
+          path: ~/genmc
+          key: genmc-${{ env.GENMC_COMMIT }}-llvm19-ubuntu24.04
+      - name: Build GenMC
+        if: steps.cache.outputs.cache-hit != 'true'
+        run: |
+          git clone https://github.com/MPI-SWS/genmc /tmp/genmc
+          cd /tmp/genmc && git checkout "$GENMC_COMMIT"
+          CC=gcc-14 CXX=g++-14 cmake -G Ninja -DCMAKE_BUILD_TYPE=Release \
+            -DCMAKE_PREFIX_PATH=/usr/lib/llvm-19/cmake -DCMAKE_INSTALL_PREFIX=$HOME/genmc -B build -S .
+          cmake --build build
+          cmake --install build
+      - name: Run models
+        run: |
+          export PATH=$HOME/genmc/bin:/usr/lib/llvm-19/bin:$PATH
+          tests/model/run_models.sh
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: genmc-results
+          path: docs/results/genmc.md

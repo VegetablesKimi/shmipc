@@ -75,3 +75,7 @@ shmipc_test(shmipc_chaos_tests chaos 900
   chaos/chaos_test.cpp
 )
 target_compile_definitions(shmipc_chaos_tests PRIVATE SHMIPC_FAULT_INJECTION)
+
+shmipc_test(shmipc_linearizability_tests property 600
+  linearizability/linearizability_test.cpp
+)

@@ -1,0 +1,23 @@
+# GenMC (stateless model checker for C11/RC11 and IMM) for tests/model.
+# Separate from the dev image: it pulls a second LLVM and builds from source.
+#   docker build -t shmipc-genmc -f docker/Dockerfile.genmc docker
+FROM ubuntu:24.04
+
+ARG DEBIAN_FRONTEND=noninteractive
+# Pinned: GenMC has no recent release tag; this commit supports LLVM 19-22.
+ARG GENMC_COMMIT=9f6c4c0772d0c42b325681581acc6a0f3eb9b5f7
+
+RUN apt-get update && apt-get install -y --no-install-recommends \
+      build-essential g++-14 cmake ninja-build git ca-certificates \
+      clang-19 llvm-19 llvm-19-dev libclang-19-dev libffi-dev zlib1g-dev libedit-dev libzstd-dev \
+    && rm -rf /var/lib/apt/lists/*
+
+RUN git clone https://github.com/MPI-SWS/genmc /opt/genmc-src \
+    && cd /opt/genmc-src && git checkout "$GENMC_COMMIT" \
+    && CC=gcc-14 CXX=g++-14 cmake -G Ninja -DCMAKE_BUILD_TYPE=Release \
+         -DCMAKE_PREFIX_PATH=/usr/lib/llvm-19/cmake -DCMAKE_INSTALL_PREFIX=/opt/genmc -B build -S . \
+    && cmake --build build && cmake --install build \
+    && rm -rf /opt/genmc-src
+
+ENV PATH=/opt/genmc/bin:/usr/lib/llvm-19/bin:$PATH
+WORKDIR /src
