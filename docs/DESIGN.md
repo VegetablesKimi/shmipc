@@ -1,6 +1,6 @@
-# shmipc design (draft)
+# shmipc design
 
-Status: draft. Sections marked *(MSn)* are filled in when that milestone lands.
+Sections are tagged with the milestone that implemented them. The examples in `apps/` show the channels in use (apps/README.md).
 
 ## 1. Goals and non-goals
 

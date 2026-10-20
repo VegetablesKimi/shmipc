@@ -53,9 +53,14 @@ endif()
 
 if(SHMIPC_BUILD_TESTS)
   enable_testing()
+  # At the top level, so every subdirectory inherits it: GoogleTest's
+  # discovery script path is directory-scoped (bench/ and apps/ each once
+  # registered tests without it and got a broken discovery script).
+  include(GoogleTest)
   add_subdirectory(tests)
 endif()
 
 if(SHMIPC_BUILD_BENCH)
   add_subdirectory(bench)
+  add_subdirectory(apps)  # the examples reuse the benchmark harness
 endif()

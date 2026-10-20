@@ -5,9 +5,9 @@
 //       over an SPSC queue (thread mode), plus the consumer's CPU usage
 //       (thread CPU time / wall time). This is the latency-vs-CPU trade-off
 //       of BusySpin ... Blocking.
-//   shmipc_bench mpsc [--producers=1,2,3] [--size=64] [--iters=10000000] [--cpus=0,1,2,3]
-//       Aggregate MPSC throughput as the number of producers contending on
-//       the tail CAS grows.
+//   shmipc_bench mpsc [--producers=1,2,3] [--iters=10000000] [--cpus=0,1,2,3]
+//       Aggregate MPSC throughput as the number of producers grows, against
+//       moodycamel::ConcurrentQueue and boost::lockfree::queue (thread mode).
 
 #include <time.h>
 
@@ -15,7 +15,16 @@
 #include <cstdio>
 #include <string>
 #include <thread>
+#include <memory>
+#include <span>
 #include <vector>
+
+#if defined(SHMIPC_HAVE_MOODYCAMEL)
+#include <concurrentqueue.h>
+#endif
+#if defined(SHMIPC_HAVE_BOOST_LOCKFREE)
+#include <boost/lockfree/queue.hpp>
+#endif
 
 #include "cases/cases.hpp"
 #include "harness/histogram.hpp"
@@ -160,46 +169,113 @@ int run_waitcurve(const Options& opt) {
   return 0;
 }
 
+namespace {
+
+struct Payload64 {
+  std::uint64_t seq;
+  std::byte pad[56];
+};
+static_assert(sizeof(Payload64) == 64);
+
+// Times `producers` threads pushing `per` items each into one queue, drained
+// by this thread. `make_producer(i)` returns a callable that pushes one item
+// and returns false if the queue was full; `drain()` returns how many it popped.
+template <class MakeProducer, class Drain>
+double time_mpsc(int producers, std::uint64_t per, const std::vector<int>& cpus, const CounterClock& clk,
+                 MakeProducer make_producer, Drain drain) {
+  std::atomic<int> go{0};
+  std::vector<std::thread> threads;
+  for (int i = 0; i < producers; ++i) {
+    threads.emplace_back([&, i] {
+      if (static_cast<std::size_t>(i + 1) < cpus.size()) pin_this_thread(cpus[static_cast<std::size_t>(i + 1)]);
+      auto push = make_producer(i);
+      while (go.load(std::memory_order_acquire) == 0) {
+      }
+      for (std::uint64_t k = 0; k < per; ++k) {
+        while (!push(k)) {
+        }
+      }
+    });
+  }
+  pin_this_thread(cpus[0]);
+  const std::uint64_t want = per * static_cast<std::uint64_t>(producers);
+  std::uint64_t got = 0;
+  go.store(1, std::memory_order_release);
+  const std::uint64_t t0 = read_counter();
+  while (got < want) got += drain();
+  const std::uint64_t t1 = read_counter();
+  for (auto& t : threads) t.join();
+  return static_cast<double>(want) * 1e9 / static_cast<double>(clk.to_ns(t1 - t0));
+}
+
+}  // namespace
+
 int run_mpsc(const Options& opt) {
   const auto producer_counts = opt.ints("producers", {1, 2, 3});
-  const std::size_t size = opt.u64("size", 64);
   const std::uint64_t iters = opt.u64("iters", 10'000'000);
   const auto cpus = opt.ints("cpus", {0, 1, 2, 3});
-  if (!opt.unused().empty() || size < 8) {
-    std::fprintf(stderr, "usage: shmipc_bench mpsc [--producers=1,2,3] [--size=64] [--iters=N] [--cpus=c,p1,p2,p3]\n");
+  if (!opt.unused().empty()) {
+    std::fprintf(stderr, "usage: shmipc_bench mpsc [--producers=1,2,3] [--iters=N] [--cpus=c,p1,p2,p3]\n");
     return 2;
   }
   const CounterClock clk = CounterClock::calibrate();
-  std::printf("| producers | payload | total Mmsg/s | per producer Mmsg/s |\n|---:|---:|---:|---:|\n");
+  std::printf("64-byte payloads. Mmsg/s total (per producer).\n\n");
+  std::printf("| producers | shmipc Mpsc | moodycamel ConcurrentQueue | boost::lockfree::queue |\n|---:|---:|---:|---:|\n");
+  auto cell = [](double rate, int np) {
+    char buf[64];
+    std::snprintf(buf, sizeof(buf), "%.1f (%.1f)", rate / 1e6, rate / 1e6 / np);
+    return std::string(buf);
+  };
   for (int np : producer_counts) {
-    LocalChannel<Mpsc> ch({1 << 16});
     const std::uint64_t per = iters / static_cast<std::uint64_t>(np);
-    std::atomic<int> go{0};
-    std::vector<std::thread> producers;
-    for (int i = 0; i < np; ++i) {
-      producers.emplace_back([&, i] {
-        if (static_cast<std::size_t>(i + 1) < cpus.size()) pin_this_thread(cpus[static_cast<std::size_t>(i + 1)]);
-        Mpsc::Producer p(ch.state());
-        std::vector<std::byte> payload(size);
-        while (go.load(std::memory_order_acquire) == 0) {
-        }
-        for (std::uint64_t k = 0; k < per; ++k) {
-          while (!p.try_write(1, payload)) {
-          }
-        }
-      });
+
+    // shmipc: variable-length records, 64-byte payload, in a 64 KB ring.
+    LocalChannel<Mpsc> ch({1 << 16});
+    Mpsc::Consumer consumer(ch.state());
+    const double ours = time_mpsc(
+        np, per, cpus, clk,
+        [&](int) {
+          return [p = std::make_shared<Mpsc::Producer>(ch.state())](std::uint64_t k) {
+            Payload64 v{k, {}};
+            return p->try_write(1, std::as_bytes(std::span(&v, 1)));
+          };
+        },
+        [&] { return consumer.drain([](const Mpsc::RecordView&) {}); });
+
+    std::string mc = "n/a", bl = "n/a";
+#if defined(SHMIPC_HAVE_MOODYCAMEL)
+    {
+      // Bounded like the rings: pre-sized, and try_enqueue never allocates.
+      moodycamel::ConcurrentQueue<Payload64> q(1024, static_cast<std::size_t>(np), 0);
+      const double r = time_mpsc(
+          np, per, cpus, clk,
+          [&](int) {
+            return [&q, tok = std::make_shared<moodycamel::ProducerToken>(q)](std::uint64_t k) {
+              return q.try_enqueue(*tok, Payload64{k, {}});
+            };
+          },
+          [&] {
+            Payload64 buf[64];
+            return static_cast<std::uint64_t>(q.try_dequeue_bulk(buf, 64));
+          });
+      mc = cell(r, np);
     }
-    pin_this_thread(cpus[0]);
-    Mpsc::Consumer c(ch.state());
-    const std::uint64_t want = per * static_cast<std::uint64_t>(np);
-    std::uint64_t got = 0;
-    go.store(1, std::memory_order_release);
-    const std::uint64_t t0 = read_counter();
-    while (got < want) got += c.drain([](const Mpsc::RecordView&) {});
-    const std::uint64_t t1 = read_counter();
-    for (auto& t : producers) t.join();
-    const double rate = static_cast<double>(want) * 1e9 / static_cast<double>(clk.to_ns(t1 - t0));
-    std::printf("| %d | %zu B | %.1f | %.1f |\n", np, size, rate / 1e6, rate / 1e6 / np);
+#endif
+#if defined(SHMIPC_HAVE_BOOST_LOCKFREE)
+    {
+      boost::lockfree::queue<Payload64, boost::lockfree::fixed_sized<true>> q(1024);
+      const double r = time_mpsc(
+          np, per, cpus, clk, [&](int) { return [&q](std::uint64_t k) { return q.bounded_push(Payload64{k, {}}); }; },
+          [&] {
+            Payload64 v;
+            std::uint64_t n = 0;
+            while (n < 64 && q.pop(v)) ++n;
+            return n;
+          });
+      bl = cell(r, np);
+    }
+#endif
+    std::printf("| %d | %s | %s | %s |\n", np, cell(ours, np).c_str(), mc.c_str(), bl.c_str());
     std::fflush(stdout);
   }
   return 0;

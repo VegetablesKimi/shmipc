@@ -23,7 +23,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - name: Install toolchain
-        run: sudo apt-get update && sudo apt-get install -y ninja-build clang-18 libclang-rt-18-dev g++-14
+        run: sudo apt-get update && sudo apt-get install -y ninja-build clang-18 libclang-rt-18-dev g++-14 libboost-dev
       - name: Reduce ASLR entropy for TSan
         # TSan's shadow mapping breaks with the 32-bit mmap randomisation of recent kernels.
         if: matrix.preset == 'tsan'

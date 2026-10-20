@@ -113,3 +113,23 @@ In SPSC the producer owns both its tail and its cache, so `tail - head_cache <= 
 The SPSC consumer chaos test briefly reported "gaps" (skipped messages). The child consumer popped a message, which reads and releases it, and only then recorded "last processed". A kill between the two made the log say the instance had processed one message fewer than it had released.
 
 The library was right. The fix was to record first, then release, which makes a kill in between a redelivery, the documented at-least-once behaviour. When a chaos test fails, first ask whether the observer is crash-consistent too.
+
+## 9. The first program to use two channels did not compile (MS7)
+
+`broadcast.hpp` and `mpsc.hpp` each defined `detail::unpack_header(uint64_t)`. Every test included one or the other, so this went unnoticed until the apps end-to-end test, the first translation unit to use both, failed with a redefinition error.
+
+**Fix.**
+- The header packing moved to `record::pack` and `record::unpack`, shared by both.
+- `tests/unit/headers_test.cpp` now includes every public header in one translation unit. CMake generates the include list from `include/` at configure time, so a new header is covered automatically.
+
+**Takeaway.** For a header-only library, "each header compiles" is not the same as "the headers compile together". Test the union.
+
+## 10. Benchmarks against other libraries need an explanation, not just a ranking (MS7)
+
+shmipc's SPSC beat rigtorp by 3.5× at 16-byte messages and lost by 1.45× at 64 bytes, and both results were stable over repeats.
+
+**The obvious story was wrong.** I expected false sharing from rigtorp's 64-byte alignment on the M4's 128-byte lines. Its source groups fields by writer, so 128-byte lines do not hurt it.
+
+**What I did instead.** BENCHMARKS.md records the result as measured but unexplained, together with the rejected hypothesis. Explaining it needs PMU counters, and the VM has none.
+
+**Takeaway.** A comparison table is only as good as the analysis next to it. A wrong but plausible explanation is worse than none.

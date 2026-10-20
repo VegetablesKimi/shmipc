@@ -101,19 +101,6 @@ inline std::atomic_ref<std::uint64_t> header_word(std::byte* rec) noexcept {
 }
 static_assert(std::atomic_ref<std::uint64_t>::is_always_lock_free);
 
-inline std::uint64_t pack_header(std::int32_t length, std::uint16_t type, std::uint16_t flags) noexcept {
-  const record::Header h{length, type, flags};
-  std::uint64_t w;
-  std::memcpy(&w, &h, sizeof(w));
-  return w;
-}
-
-inline record::Header unpack_header(std::uint64_t w) noexcept {
-  record::Header h;
-  std::memcpy(&h, &w, sizeof(h));
-  return h;
-}
-
 // Owner tag in the header's flags: low byte = slot index + 1 (0 = unknown),
 // high byte = low 8 bits of the slot's generation. The generation tells a
 // dead owner apart from a newer producer that later took the same slot.
@@ -235,7 +222,7 @@ class Mpsc {
       SHMIPC_ASSUME(tail % record::kAlignment == 0);
       if (pad != 0) {
         SHMIPC_ASSUME((tail & mask_) + record::kHeaderSize <= capacity_);
-        if (!install(data_ + (tail & mask_), detail::pack_header(static_cast<std::int32_t>(pad), record::kPaddingType, 0))) {
+        if (!install(data_ + (tail & mask_), record::pack(static_cast<std::int32_t>(pad), record::kPaddingType, 0))) {
           return revoked(slot);
         }
         tail += pad;
@@ -244,7 +231,7 @@ class Mpsc {
       SHMIPC_ASSUME((tail & mask_) + size <= capacity_);
       // Negative length: claimed, being written. The owner tag lets unblock()
       // decide whether the writer is dead.
-      if (!install(rec, detail::pack_header(-length, type, owner_))) return revoked(slot);
+      if (!install(rec, record::pack(-length, type, owner_))) return revoked(slot);
       // SYNC(claim.header -> unblock.claiming): a consumer that sees claiming
       // == 0 here also sees the header.
       if (slot != nullptr) slot->claiming.store(0, std::memory_order_release);
@@ -255,13 +242,13 @@ class Mpsc {
     // Publishes a claimed record.
     void commit(const Claim& c) const noexcept {
       // SYNC(mpsc.commit -> mpsc.consume): payload visible before the header.
-      detail::header_word(c.record).store(detail::pack_header(c.length, c.type, c.owner),
+      detail::header_word(c.record).store(record::pack(c.length, c.type, c.owner),
                                           ordered(OrderSite::kMpscCommit, std::memory_order_release));
     }
 
     // Gives a claim back without data: it becomes padding the consumer skips.
     void abort(const Claim& c) const noexcept {
-      detail::header_word(c.record).store(detail::pack_header(c.length, record::kPaddingType, 0),
+      detail::header_word(c.record).store(record::pack(c.length, record::kPaddingType, 0),
                                           ordered(OrderSite::kMpscCommit, std::memory_order_release));
     }
 
@@ -339,7 +326,7 @@ class Mpsc {
       while (count < limit && bytes < capacity_) {
         std::byte* rec = data_ + ((head_ + bytes) & mask_);
         // SYNC(mpsc.commit -> mpsc.consume)
-        const record::Header h = detail::unpack_header(
+        const record::Header h = record::unpack(
             detail::header_word(rec).load(ordered(OrderSite::kMpscConsume, std::memory_order_acquire)));
         if (h.length <= 0) break;  // 0: not claimed (or no header yet); < 0: being written
         bytes += record::aligned_size(static_cast<std::uint64_t>(h.length));
@@ -354,7 +341,7 @@ class Mpsc {
 
     // True if the next record is committed (for wait predicates; no side effects).
     bool ready() const noexcept {
-      return detail::unpack_header(detail::header_word(data_ + (head_ & mask_))
+      return record::unpack(detail::header_word(data_ + (head_ & mask_))
                                        .load(ordered(OrderSite::kMpscConsume, std::memory_order_acquire)))
                  .length > 0;
     }
@@ -373,12 +360,12 @@ class Mpsc {
       }
       std::byte* rec = data_ + (head_ & mask_);
       std::uint64_t w = detail::header_word(rec).load(std::memory_order_acquire);
-      const record::Header h = detail::unpack_header(w);
+      const record::Header h = record::unpack(w);
       if (h.length > 0) return Unblock::kNotStuck;
 
       if (h.length < 0) {  // header installed, never committed
         if (!owner_dead(h.flags)) return Unblock::kOwnerAlive;
-        const std::uint64_t pad = detail::pack_header(
+        const std::uint64_t pad = record::pack(
             static_cast<std::int32_t>(record::aligned_size(static_cast<std::uint64_t>(-h.length))),
             record::kPaddingType, 0);
         return detail::header_word(rec).compare_exchange_strong(w, pad, std::memory_order_release,
@@ -415,7 +402,7 @@ class Mpsc {
       }
       std::uint64_t expected = 0;
       return detail::header_word(rec).compare_exchange_strong(
-                 expected, detail::pack_header(static_cast<std::int32_t>(size), record::kPaddingType, 0),
+                 expected, record::pack(static_cast<std::int32_t>(size), record::kPaddingType, 0),
                  std::memory_order_release, std::memory_order_relaxed)
                  ? Unblock::kUnblocked
                  : Unblock::kNotStuck;

@@ -62,6 +62,21 @@ inline Header read_header(const std::byte* rec) noexcept {
   return h;
 }
 
+// The whole header as one 64-bit word, for channels that access it as a
+// single atomic (broadcast, MPSC). memcpy keeps the layout identical to Header.
+inline std::uint64_t pack(std::int32_t length, std::uint16_t type, std::uint16_t flags = 0) noexcept {
+  const Header h{length, type, flags};
+  std::uint64_t w;
+  std::memcpy(&w, &h, sizeof(w));
+  return w;
+}
+
+inline Header unpack(std::uint64_t w) noexcept {
+  Header h;
+  std::memcpy(&h, &w, sizeof(h));
+  return h;
+}
+
 // Atomic access to the length field, for channels where it is the
 // publication point.
 static_assert(std::atomic_ref<std::int32_t>::required_alignment <= kAlignment);

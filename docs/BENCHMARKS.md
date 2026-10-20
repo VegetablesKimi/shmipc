@@ -1,9 +1,13 @@
 # Benchmarks
 
-Status: first results (MS2): SPSC queue against a mutex baseline, on an Apple M4.
+Status: SPSC, MPSC, wait strategies and the race-safe copy measured on an Apple M4. Compared with rigtorp/SPSCQueue, moodycamel (ReaderWriterQueue, ConcurrentQueue), Boost.Lockfree and a pthread-mutex baseline.
 
-- **Not yet measured:** topology-stratified numbers (SMT siblings, same L3, across CCX, across socket) and comparisons with boost.lockfree, rigtorp, moodycamel and Aeron. These need an x86 server and are planned for MS7.
-- **Already in place:** the scripts and result format, so those runs are a matter of executing `bench/scripts/run_all.sh` on the right machine.
+- **Not yet measured:**
+  - topology-stratified numbers (SMT siblings, same L3, across CCX, across socket);
+  - PMU-based analysis (`perf stat`, `perf c2c`);
+  - Aeron IPC.
+
+  These need a bare-metal x86 server. The scripts and the result format are ready (`CPUS=a,b bench/scripts/run_all.sh`).
 
 ## Method
 
@@ -135,6 +139,54 @@ Blocking recorded 9,565 / 145 / 4 kernel sleeps at the three rates, and **0 time
 - **When messages are dense (1M/s), they converge.** The consumer is never idle long enough to back off or sleep, so every strategy behaves like a spin.
 - **Yield on an otherwise idle machine is a spin**: `sched_yield` returns immediately when nothing else is runnable.
 - **p99 and above are not shown, deliberately.** In these single runs the tails come from VM scheduling of the sender (thousands of late sends) and vary by orders of magnitude between runs. They need a bare-metal, isolated-core run before they mean anything. macOS-native runs showed the same p50 ordering but are unpinned and noisier still.
+
+## Against other queues (MS7)
+
+Linux VM (Docker on an M4, TSO mode, vCPUs 2,3 pinned), thread mode, capacity 1024. Raw tables: [SPSC](results/m4-linux-docker-competitors.md), [MPSC](results/m4-linux-docker-mpsc-competitors.md).
+
+**Only shmipc and the mutex baseline can run across processes.** The others allocate their buffers on the process-private heap, so they are compared in thread mode, where they are at their best.
+
+### SPSC round trip (ns)
+
+| payload | shmipc p50 / p99 / p99.9 | rigtorp | moodycamel RWQ | Boost spsc_queue | mutex |
+|---:|---|---|---|---|---|
+| 16 B | 208 / 249 / 541 | 166 / 208 / 458 | 208 / 291 / 541 | 249 / 333 / 624 | 1249 / 2541 / 12423 |
+| 64 B | 208 / 249 / 458 | 166 / 249 / 666 | 249 / 458 / 833 | 291 / 374 / 791 | 1208 / 2209 / 11543 |
+| 1024 B | 541 / 791 / 1916 | 541 / 833 / 1541 | 666 / 833 / 1999 | 458 / 541 / 1041 | 1958 / 3291 / 14215 |
+
+The three cached-index rings (shmipc, rigtorp, moodycamel) are within one or two counter ticks (41.7 ns) of each other at p50. Differences that small are below this machine's resolution. The mutex is about 6× slower and has a 20× worse p99.9.
+
+### SPSC throughput (Mmsg/s; 64 B and 16 B repeated 5 and 3 times)
+
+| payload | shmipc | rigtorp | moodycamel | Boost | mutex |
+|---:|---:|---:|---:|---:|---:|
+| 16 B | **364–554** | 105–106 | 264 | 34 | 18 |
+| 64 B | 132–146 | **186–209** | 118–128 | 47 | 18 |
+| 256 B | 46 | 34 | 40 | 22 | 13 |
+| 1024 B | 16 | 17 | 21 | 12 | 4 |
+
+**This is measured but not yet explained, and the explanation I expected is wrong.**
+- shmipc is about 3.5× faster than rigtorp at 16 B, and about 1.45× slower at 64 B. Both results are stable across repeats.
+- I expected false sharing in rigtorp: it aligns to 64 B (libstdc++ under clang 18 does not provide `hardware_destructive_interference_size`), while the M4's lines are 128 B.
+- Reading its layout rules that out: `writeIdx_` and `readIdxCache_` (both producer-written) share one 128 B line, and `readIdx_` and `writeIdxCache_` (both consumer-written) share the other. So 128 B lines cost it nothing.
+- What remains is per-message code paths: shmipc builds a span through `try_claim`; rigtorp constructs in place. Both are plausible, and neither is verified. The VM exposes no PMU counters, so this needs `perf` on bare metal before anything is claimed.
+
+### MPSC throughput, 64 B payloads (Mmsg/s total)
+
+| producers | shmipc Mpsc | moodycamel ConcurrentQueue | Boost lockfree::queue |
+|---:|---:|---:|---:|
+| 1 | 35.2 | 33.0 | 4.5 |
+| 2 | 11.4 | 87.0 | 4.5 |
+| 3 | 10.5 | 66.3 | 4.0 |
+
+**moodycamel is 6–8× faster with several producers, by design.**
+- It gives each producer its own sub-queue (the `ProducerToken`), so producers never share a cache line, and the consumer dequeues in bulk.
+- The price: no order *across* producers (only per-producer FIFO), no shared-memory placement, and no crash recovery.
+- shmipc's MPSC chooses one shared tail CAS, which gives a total claim order across producers, variable-length records, cross-process use, and `unblock()` for crashed producers. It pays for that in contention.
+
+Boost's `lockfree::queue` is a node-based Michael–Scott queue. It is slow even with one producer: every operation CASes shared pointers and touches a freelist.
+
+For latency-critical fan-in, the right shmipc design is one SPSC ring per producer, polled by the consumer. That is moodycamel's idea, and DESIGN.md §4d already suggests it.
 
 ## Limitations (read before quoting a number)
 

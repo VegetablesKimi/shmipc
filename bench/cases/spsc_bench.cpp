@@ -26,6 +26,7 @@
 #include <unistd.h>
 
 #include <array>
+#include <cstdlib>
 #include <atomic>
 #include <cstdio>
 #include <fstream>
@@ -270,10 +271,30 @@ bool dispatch_bench(const Params& p, const CounterClock& clk, Outcome& out) {
   return false;
 }
 
+template <class Transport, class M>
+bool run_transport(const Params& p, const CounterClock& clk, Outcome& out) {
+  if (p.process && !Transport::kCrossProcess) {
+    std::fprintf(stderr, "error: %s cannot live in shared memory (heap-allocated buffer): thread mode only\n",
+                 Transport::kName);
+    std::exit(2);
+  }
+  return dispatch_bench<Transport, M>(p, clk, out);
+}
+
 template <std::size_t N>
 bool dispatch_transport(const Params& p, const CounterClock& clk, Outcome& out) {
-  if (p.transport == "shmipc") return dispatch_bench<ShmipcSpsc<Msg<N>>, Msg<N>>(p, clk, out);
-  if (p.transport == "mutex") return dispatch_bench<MutexSpsc<Msg<N>>, Msg<N>>(p, clk, out);
+  using M = Msg<N>;
+  if (p.transport == "shmipc") return run_transport<ShmipcSpsc<M>, M>(p, clk, out);
+  if (p.transport == "mutex") return run_transport<MutexSpsc<M>, M>(p, clk, out);
+#if defined(SHMIPC_HAVE_RIGTORP)
+  if (p.transport == "rigtorp") return run_transport<RigtorpSpsc<M>, M>(p, clk, out);
+#endif
+#if defined(SHMIPC_HAVE_MOODYCAMEL)
+  if (p.transport == "moodycamel") return run_transport<MoodycamelSpsc<M>, M>(p, clk, out);
+#endif
+#if defined(SHMIPC_HAVE_BOOST_LOCKFREE)
+  if (p.transport == "boost") return run_transport<BoostSpsc<M>, M>(p, clk, out);
+#endif
   return false;
 }
 
@@ -341,7 +362,7 @@ int run_copy(const Options& opt) {
 
 int usage(const std::string& err) {
   std::fprintf(stderr,
-               "error: %s\nusage: shmipc_bench copy [--iters=N] | pingpong|oneway|throughput --transport=shmipc|mutex "
+               "error: %s\nusage: shmipc_bench copy [--iters=N] | pingpong|oneway|throughput --transport=shmipc|mutex|rigtorp|moodycamel|boost "
                "--mode=thread|process --size=16|64|256|1024 --cpus=A,B [--iters=N] [--warmup=N] "
                "[--rate=N] [--capacity=N] [--out=FILE]\n",
                err.c_str());

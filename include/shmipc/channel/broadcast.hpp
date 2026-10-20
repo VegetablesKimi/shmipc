@@ -98,19 +98,6 @@ struct BroadcastState {
 };
 static_assert(sizeof(BroadcastState) == 5 * kFalseSharingRange);
 
-inline Word pack_header(std::int32_t length, std::uint16_t type) noexcept {
-  const record::Header h{length, type, 0};
-  Word w;
-  std::memcpy(&w, &h, sizeof(w));
-  return w;
-}
-
-inline record::Header unpack_header(Word w) noexcept {
-  record::Header h;
-  std::memcpy(&h, &w, sizeof(h));
-  return h;
-}
-
 }  // namespace detail
 
 class Broadcast {
@@ -182,13 +169,13 @@ class Broadcast {
       SHMIPC_ASSUME(pos % record::kAlignment == 0);  // see SpscByteRing::try_claim
       if (pad != 0) {
         detail::store_word(words_ + pos / 8,
-                           detail::pack_header(static_cast<std::int32_t>(pad), record::kPaddingType));
+                           record::pack(static_cast<std::int32_t>(pad), record::kPaddingType));
         tail_ += pad;
         pos = 0;
       }
       SHMIPC_ASSUME(pos + size <= capacity_);
       detail::Word* rec = words_ + pos / 8;
-      detail::store_word(rec, detail::pack_header(length, type));
+      detail::store_word(rec, record::pack(length, type));
       detail::store_word(rec + 1, seq_);
       detail::store_bytes(rec + 2, payload.data(), payload.size());
 
@@ -258,10 +245,10 @@ class Broadcast {
         // the length, so it is bounds-checked before it is used.
         const std::uint64_t start = cursor_;
         std::uint64_t pos = start;
-        record::Header h = detail::unpack_header(detail::load_word(words_ + (pos & mask_) / 8));
+        record::Header h = record::unpack(detail::load_word(words_ + (pos & mask_) / 8));
         if (h.type == record::kPaddingType) {
           pos += static_cast<std::uint64_t>(h.length);
-          h = detail::unpack_header(detail::load_word(words_ + (pos & mask_) / 8));
+          h = record::unpack(detail::load_word(words_ + (pos & mask_) / 8));
         }
         const bool sane = h.type != record::kPaddingType &&
                           h.length >= static_cast<std::int32_t>(detail::kBcastHeaderSize) &&

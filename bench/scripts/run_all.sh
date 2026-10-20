@@ -37,9 +37,17 @@ else
   tput_iters=()
 fi
 
+# Competitors this binary was built with (probe each with a 2-iteration run).
+competitors=()
+for c in rigtorp moodycamel boost; do
+  "$bin" pingpong --transport="$c" --iters=2 --warmup=0 >/dev/null 2>&1 && competitors+=("$c")
+done
+
 for bench in pingpong oneway throughput; do
-  for transport in shmipc mutex; do
+  for transport in shmipc mutex ${competitors[@]+"${competitors[@]}"}; do
     for mode in thread process; do
+      # Competitor queues live on the private heap: thread mode only.
+      if [[ "$mode" == process && "$transport" != shmipc && "$transport" != mutex ]]; then continue; fi
       for size in "${sizes[@]}"; do
         name="$bench-$transport-$mode-$size"
         if [[ "$bench" == throughput ]]; then extra=("${tput_iters[@]+"${tput_iters[@]}"}"); else extra=("${lat_iters[@]+"${lat_iters[@]}"}"); fi
