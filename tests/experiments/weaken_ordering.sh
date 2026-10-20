@@ -24,7 +24,7 @@ mkdir -p "$repo/docs/results"
 
 # bit name filter
 configs=(
-  "none   control           SpscStress.*:BroadcastStress.*:SeqlockStress.*"
+  "none   control           SpscStress.*:BroadcastStress.*:SeqlockStress.*:MpscStress.*:LostWakeupStress.*"
   "0      spsc.publish      SpscStress.*"
   "1      spsc.consume      SpscStress.*"
   "2      spsc.release      SpscStress.*"
@@ -40,6 +40,15 @@ configs=(
   "10     seqlock.read      SeqlockStress.*"
   "11     seqlock.validate  SeqlockStress.*"
   "8-11   seqlock.all       SeqlockStress.*"
+  "12     mpsc.commit       MpscStress.*"
+  "13     mpsc.consume      MpscStress.*"
+  "14     mpsc.release      MpscStress.*"
+  "15     mpsc.reclaim      MpscStress.*"
+  "16     mpsc.headcache    MpscStress.*"
+  "12-16  mpsc.all          MpscStress.*"
+  "17     doorbell.notify   LostWakeupStress.*"
+  "18     doorbell.wait     LostWakeupStress.*"
+  "17-18  doorbell.all      LostWakeupStress.*"
 )
 
 mask_of() {
@@ -84,7 +93,7 @@ for line in "${configs[@]}"; do
       after="$(( $(date +%s) - start ))s (run $runs)"
       # First failing test and its first assertion message.
       test_name=$(grep -m1 -oE '\[  FAILED  \] [A-Za-z.]+' "$log" | awk '{print $NF}' || true)
-      reason=$(grep -m1 -E 'saw a torn|accepted a torn|Expected equality|catch up|accounting' "$log" | sed 's/|/\\|/g' | cut -c1-80 || true)
+      reason=$(grep -m1 -E 'lost wakeup|bad record|corrupt payload|saw a torn|accepted a torn|Expected equality|catch up|accounting' "$log" | sed 's/|/\\|/g' | cut -c1-80 || true)
       result="${test_name:-hang/crash} ${reason}"
       break
     fi

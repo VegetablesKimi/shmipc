@@ -73,3 +73,24 @@ The VM forbids exactly what TSO forbids and allows exactly what TSO allows. Its 
 - Linux-VM benchmark numbers were measured in TSO mode, which can cost performance on Apple cores. BENCHMARKS.md notes this.
 
 **Takeaway.** "arm64" in `uname -m` describes the instruction set, not the memory model the code actually runs under. Check the environment with a litmus test before using it as evidence about ordering.
+
+## 6. An unsigned underflow that only interleaving can reach (MS4)
+
+**Symptom.** In the MPSC stress test, the consumer received records with corrupted payloads. The bytes were not zeros: they were fragments of *other* records. One producer passed; two or three failed within a second. The single-threaded RapidCheck model, with out-of-order commits, passed thousands of cases.
+
+**Cause.** Producers share a cached copy of the consumer's head, so that claims rarely touch the consumer's cache line. The free-space check was the one the SPSC ring uses:
+
+```cpp
+if (capacity - (tail - head) < needed) { refresh head; ... }
+```
+
+With several producers, the cache can be very stale. Producer A loads `head_cache`. Producer B then refreshes the real head and claims a lot of space. When A retries its CAS with the new tail, `tail - head` can exceed `capacity`, and `capacity - (tail - head)` wraps around to a huge unsigned "free" value. A's check passes without refreshing, and A writes over records the consumer has not read yet.
+
+In SPSC the producer owns both its tail and its cache, so `tail - head_cache <= capacity` always holds. The bug cannot happen there, which is how it was copied without suspicion.
+
+**Fix.** Compare without subtracting from capacity: `tail - head > capacity - needed`. That form cannot underflow, because `needed <= capacity` is guaranteed by the capacity/2 record limit. The SPSC check now uses the same form.
+
+**Takeaway.**
+- Model-based tests check *sequential* logic. This bug needed a specific interleaving of two producers, so only the concurrent stress test could find it (and a model checker would have, MS6).
+- When copying an invariant-based check into a setting with more writers, re-derive the invariant, here `used <= capacity`.
+- Agrona computes the same quantity in a signed `int`, which turns the underflow into a negative number that fails the check. The C++ port with unsigned `uint64_t` lost that protection silently.

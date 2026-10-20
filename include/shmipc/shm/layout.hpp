@@ -14,7 +14,7 @@ namespace shmipc {
 inline constexpr std::uint64_t kSegmentMagic = 0x3130'4350'494D'4853ull;
 
 // Bumped on any incompatible change to the header or to a channel's layout.
-inline constexpr std::uint32_t kProtocolVersion = 1;
+inline constexpr std::uint32_t kProtocolVersion = 2;  // 2: doorbell line added to channel states
 
 enum class ChannelKind : std::uint32_t {
   kNone = 0,

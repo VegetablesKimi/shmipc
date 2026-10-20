@@ -22,7 +22,7 @@ target_include_directories(shmipc_bench_harness PUBLIC ${CMAKE_CURRENT_SOURCE_DI
 target_link_libraries(shmipc_bench_harness PUBLIC shmipc::shmipc hdr_histogram_static)
 target_compile_options(shmipc_bench_harness PRIVATE -Wall -Wextra $<$<BOOL:${SHMIPC_WERROR}>:-Werror>)
 
-add_executable(shmipc_bench cases/spsc_bench.cpp)
+add_executable(shmipc_bench cases/spsc_bench.cpp cases/wait_bench.cpp)
 target_link_libraries(shmipc_bench PRIVATE shmipc_bench_harness)
 target_compile_options(shmipc_bench PRIVATE -Wall -Wextra $<$<BOOL:${SHMIPC_WERROR}>:-Werror>)
 

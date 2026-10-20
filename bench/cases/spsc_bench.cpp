@@ -5,6 +5,8 @@
 //   shmipc_bench oneway     ... --rate=500000   (messages per second, open loop)
 //   shmipc_bench throughput ... --iters=10000000
 //   shmipc_bench copy       race-safe word copy vs memcpy, single thread
+//   shmipc_bench waitcurve  wait strategies: latency vs consumer CPU (cases/wait_bench.cpp)
+//   shmipc_bench mpsc       MPSC throughput vs producer count (cases/wait_bench.cpp)
 //   common: --capacity=1024 --out=result.json
 //
 // pingpong   Round trip A -> B -> A, timed on A with one counter. No clock
@@ -33,6 +35,7 @@
 #include <thread>
 #include <type_traits>
 
+#include "cases/cases.hpp"
 #include "cases/transports.hpp"
 #include "shmipc/channel/atomic_copy.hpp"
 #include "harness/env.hpp"
@@ -350,6 +353,8 @@ int run(int argc, char** argv) {
   const auto opt = Options::parse(argc, argv, &err);
   if (!opt) return usage(err);
   if (opt->command() == "copy") return run_copy(*opt);
+  if (opt->command() == "waitcurve") return run_waitcurve(*opt);
+  if (opt->command() == "mpsc") return run_mpsc(*opt);
 
   Params p;
   p.bench = opt->command();

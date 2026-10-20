@@ -15,6 +15,7 @@
 #include "shmipc/platform/ordering.hpp"
 #include "shmipc/proto/record.hpp"
 #include "shmipc/shm/layout.hpp"
+#include "shmipc/wait/doorbell.hpp"
 
 // Single-producer / single-consumer rings.
 //
@@ -64,8 +65,9 @@ struct alignas(kFalseSharingRange) SpscConfigLine {
 struct SpscState {
   SpscConfigLine config;
   SpscIndices idx;
+  Doorbell bell;  // the consumer sleeps here under Blocking; the producer notify()s
 };
-static_assert(sizeof(SpscState) == 3 * kFalseSharingRange);
+static_assert(sizeof(SpscState) == 4 * kFalseSharingRange);
 static_assert(std::atomic<std::uint64_t>::is_always_lock_free);
 
 inline SpscState* construct_spsc_state(std::byte* mem, std::uint64_t capacity) noexcept {
@@ -157,6 +159,9 @@ class SpscQueue {
       return true;
     }
 
+    // Wakes a consumer sleeping in Blocking::wait (see wait/doorbell.hpp).
+    void notify() const noexcept { s_->bell.notify(); }
+
     std::uint64_t capacity() const noexcept { return capacity_; }
 
    private:
@@ -208,6 +213,8 @@ class SpscQueue {
       release(1);
       return true;
     }
+
+    Doorbell& doorbell() const noexcept { return s_->bell; }
 
     // Calls f(const T&) for up to `max` messages, releasing them with a single
     // store. Returns how many were consumed.
@@ -315,10 +322,12 @@ class SpscByteRing {
       // end, the rest of the ring is filled with a padding record first.
       const std::uint64_t pad = size > to_end ? to_end : 0;
 
-      if (capacity_ - (claimed_ - head_cache_) < pad + size) {
+      // Same underflow-free form as Mpsc::try_claim. With one producer,
+      // used <= capacity always holds, but the safe form costs nothing.
+      if (claimed_ - head_cache_ > capacity_ - (pad + size)) {
         // SYNC(spsc.release -> spsc.reclaim)
         head_cache_ = s_->idx.head.value.load(ordered(OrderSite::kSpscReclaim, std::memory_order_acquire));
-        if (capacity_ - (claimed_ - head_cache_) < pad + size) return {};
+        if (claimed_ - head_cache_ > capacity_ - (pad + size)) return {};
       }
       // Invariant: positions are 8-aligned (every record size is), so a
       // header at any position fits before the end of the ring.
@@ -351,6 +360,8 @@ class SpscByteRing {
     }
 
     std::size_t max_payload_size() const noexcept { return max_payload_; }
+
+    void notify() const noexcept { s_->bell.notify(); }
 
    private:
     State* s_;
@@ -401,6 +412,8 @@ class SpscByteRing {
       // SYNC(spsc.release -> spsc.reclaim)
       s_->idx.head.value.store(head_, ordered(OrderSite::kSpscRelease, std::memory_order_release));
     }
+
+    Doorbell& doorbell() const noexcept { return s_->bell; }
 
     // Calls f(const RecordView&) for up to `max` records, then releases them
     // all with one store. Returns how many were consumed.

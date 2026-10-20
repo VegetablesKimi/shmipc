@@ -11,6 +11,12 @@ on:
       budget:
         description: Seconds of stress per configuration
         default: "60"
+      sites:
+        description: Space-separated site bits/ranges to run (empty = all), e.g. "none 12 17 18"
+        default: ""
+      label:
+        description: Suffix for the result file name
+        default: "all"
 
 jobs:
   weaken:
@@ -31,8 +37,8 @@ jobs:
           lscpu | grep -E "Model name|Architecture|^CPU\(s\)"
           tests/experiments/litmus/run.sh
       - name: Experiment
-        run: BUDGET=${{ inputs.budget }} tests/experiments/weaken_ordering.sh gha-${{ matrix.os }}
+        run: BUDGET=${{ inputs.budget }} SITES="${{ inputs.sites }}" tests/experiments/weaken_ordering.sh gha-${{ matrix.os }}-${{ inputs.label }}
       - uses: actions/upload-artifact@v4
         with:
-          name: weaken-${{ matrix.os }}
-          path: docs/results/weaken-gha-${{ matrix.os }}.md
+          name: weaken-${{ matrix.os }}-${{ inputs.label }}
+          path: docs/results/weaken-gha-${{ matrix.os }}-${{ inputs.label }}.md

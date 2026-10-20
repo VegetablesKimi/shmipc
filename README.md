@@ -2,10 +2,10 @@
 
 Low-latency inter-process messaging over shared memory, built for a trading stack. It provides SPSC, MPSC, and broadcast channels, handles crashed and slow peers, has memory-ordering arguments that are checked on aarch64, and backs its claims with reproducible benchmarks.
 
-> Status: milestone 3 of 7.
-> - **Done:** shared-memory segments; SPSC, broadcast (1 writer, N readers, exact loss reporting) and seqlock channels; unit, property and multi-process stress tests; first benchmarks.
+> Status: milestone 4 of 7.
+> - **Done:** shared-memory segments; SPSC, MPSC, broadcast (1 writer, N readers, exact loss reporting) and seqlock channels; five wait strategies, including cross-process blocking with a lost-wakeup-free doorbell; unit, property and multi-process stress tests; benchmarks.
 > - **Done:** a memory-ordering bug-injection experiment on four machines: Apple M4, Neoverse-N2, M4 in TSO mode, and AMD EPYC ([CORRECTNESS.md](docs/CORRECTNESS.md) §5). Every acquire/release is weakened in turn, to check that the stress tests catch it. Weakly ordered cores catch up to 10 of the 12 sites; TSO cores catch none.
-> - **Not started:** MPSC, wait strategies, fault recovery, model checking (milestones 4–6).
+> - **Not started:** fault recovery and model checking (milestones 5–6).
 > - **Documentation:** [design](docs/DESIGN.md), [correctness](docs/CORRECTNESS.md), [benchmarks](docs/BENCHMARKS.md) and [lessons](docs/LESSONS.md).
 
 First numbers on an Apple M4 (Linux VM, pinned, 64-byte messages). These are directional only; see the limitations in BENCHMARKS.md.
@@ -43,7 +43,8 @@ docker/run.sh bash -c 'cmake --preset tsan && cmake --build --preset tsan && cte
 include/shmipc/platform/   cache-line constants, cpu_relax, counters, affinity, process identity, wait/wake
 include/shmipc/shm/        named segments, header and init protocol, offsets
 include/shmipc/proto/      record framing for variable-length channels
-include/shmipc/channel/    SpscQueue<T>, SpscByteRing, Broadcast, Seqlock<T>, ShmChannel / LocalChannel
+include/shmipc/channel/    SpscQueue<T>, SpscByteRing, Mpsc, Broadcast, Seqlock<T>, ShmChannel / LocalChannel
+include/shmipc/wait/       Doorbell and wait strategies (BusySpin ... Blocking)
 src/                       non-template code
 tests/                     unit, property (RapidCheck), stress (threads and processes)
 bench/                     harness (HdrHistogram, environment capture), cases, scripts

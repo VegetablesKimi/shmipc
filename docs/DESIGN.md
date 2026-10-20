@@ -131,6 +131,28 @@ Writer and reader steps:
 
 It uses the same fence pairing and the same relaxed-atomic copy as broadcast. If a writer dies mid-write, the odd sequence is left behind; a restarted writer skips past it. Readers spin until then, and handling that is MS5.
 
+## 4d. MPSC log buffer *(MS4, done)*
+
+Many producers and one consumer, with variable-length records. This is Agrona's `ManyToOneRingBuffer` protocol.
+
+- **Claim.** A producer reserves space by CAS on a shared `tail`. The CAS only arbitrates ownership of the range, so it is relaxed: the consumer never reads `tail`.
+- **Per-record publication.** Producers finish out of order, so `tail` cannot say "everything before me is written". Each record publishes itself:
+  1. After the CAS, store `length = -len` (relaxed), meaning "claimed, being written".
+  2. Write the type and payload with plain stores.
+  3. Store `length = +len` with release.
+
+  The `length` field is only ever written atomically, because the consumer may be polling exactly that word. The type/flags half of the header is written plainly; the consumer reads it only after acquiring a positive length.
+- **Consumer.** It walks from `head`, acquiring each `length`, and stops at the first record that is not positive:
+  - `0`: not claimed yet.
+  - `< 0`: claimed, still being written.
+
+  After a batch it **zeroes** the consumed bytes and then release-stores `head`. The zeroing is what keeps "0 = not yet written" true when the space is reused.
+- **Shared head cache.** Producers share a possibly stale copy of `head`, so claims rarely touch the consumer's line. It is passed between producers with release/acquire, so that the consumer's zeroing happens-before any producer's reuse of the space.
+
+  The free-space check must be written as `tail - head > capacity - needed`. The SPSC-style `capacity - (tail - head) < needed` underflows when the shared cache falls more than a ring behind (LESSONS.md #6).
+- **Known limit.** A producer that dies between claim and commit blocks the consumer at its record forever. The negative length says how far to skip. Detecting and skipping is MS5.
+- **Throughput falls as producers are added.** At 64 B it goes from 31 to 16 to 11 Mmsg/s for 1, 2 and 3 producers (BENCHMARKS.md), because every claim is a CAS on one contended line. If producers are latency-critical, one SPSC ring per producer, polled by the consumer, avoids the shared line entirely.
+
 ## 5. Record framing *(MS2, done)*
 
 ```
@@ -165,6 +187,15 @@ How a record is published differs per channel:
 
 The liveness check combines PID with process start time, which defeats PID reuse, plus a heartbeat counter. A timeout on its own would kill producers that are alive but slow.
 
-## 8. Wait strategies *(MS4)*
+## 8. Wait strategies *(MS4, done)*
 
-Five strategies: busy-spin, spin with `cpu_relax`, yield, backoff, and blocking (futex). The blocking protocol uses a `waiters` counter in shm, so the writer makes a syscall only when someone is actually asleep. The proof that no wakeup is lost goes in CORRECTNESS.md.
+`wait/strategies.hpp` provides `BusySpin`, `SpinPause`, `Yield`, `Backoff` (spin → pause → yield → sleep with growing intervals) and `Blocking` (brief spin, then a futex sleep on the channel's `Doorbell`). All share one interface, `w.wait(ready)`, and return only after `ready()` has returned true.
+
+**Doorbell.** It is one cache line per channel state, holding an `epoch` futex word and a `waiters` count.
+- The producer calls `notify()` after publishing. It is a separate call so that producers whose consumers spin do not pay for it.
+- `notify()` costs one seq_cst fence plus one load of a line that stays shared. Only when `waiters > 0` does it bump the epoch and make a syscall.
+- The waiter reads `epoch`, increments `waiters`, issues a seq_cst fence, re-checks `ready()`, and only then sleeps on the epoch value it read.
+
+The two fences make this a Dekker-style store→load handshake. Neither acquire/release nor TSO is enough for it (CORRECTNESS.md §4b).
+
+`Blocking::max_sleep` bounds each kernel sleep. Under a correct protocol it never expires, so `stats().timeouts` doubles as a lost-wakeup detector; the stress tests require it to be 0.

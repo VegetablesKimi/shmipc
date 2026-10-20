@@ -99,6 +99,43 @@ Broadcast and seqlock readers copy memory that the writer may be overwriting, so
 
 The choice is between conforming to the standard and getting bandwidth on large payloads. For now the default favours conformance.
 
+## MPSC throughput vs producer count (MS4)
+
+`shmipc_bench mpsc`: 64-byte records, a 64 KB ring, each producer on its own core, and a consumer draining flat out. Results from the Linux VM (pinned); macOS native matched within 5%:
+
+| producers | total | per producer |
+|---:|---:|---:|
+| 1 | 31.1 Mmsg/s | 31.1 |
+| 2 | 15.8 Mmsg/s | 7.9 |
+| 3 | 11.1 Mmsg/s | 3.7 |
+
+**Adding producers lowers total throughput.** Every claim is a CAS on the same `tail` line. With one producer the line stays in its cache. With two or more it migrates on almost every claim, and failed CASes add retries. This is inherent to a shared-tail MPSC.
+
+The usual answer when producers are latency-critical is one SPSC ring per producer, with the consumer polling all of them. That costs N rings and loses the single total order across producers.
+
+## Wait strategies: latency vs consumer CPU (MS4)
+
+`shmipc_bench waitcurve` runs the open-loop one-way benchmark over an SPSC queue. For each strategy and message rate it reports the consumer's latency and its CPU usage (thread CPU time / wall time). Linux VM, pinned to vCPUs 2,3, one run per point:
+
+| strategy | 10k msg/s: p50 | CPU | 100k msg/s: p50 | CPU | 1M msg/s: p50 | CPU |
+|---|---:|---:|---:|---:|---:|---:|
+| BusySpin | 333 ns | 100% | 291 ns | 97% | 124 ns | 100% |
+| SpinPause | 333 ns | 98% | 291 ns | 100% | 124 ns | 100% |
+| Yield | 458 ns | 98% | 333 ns | 100% | 291 ns | 100% |
+| Backoff | 450 µs | 8% | 124 ns | 92% | 124 ns | 95% |
+| Blocking | 16 µs | 37% | 124 ns | 94% | 124 ns | 95% |
+
+Blocking recorded 9,565 / 145 / 4 kernel sleeps at the three rates, and **0 timeouts**: no lost wakeup in any run.
+
+**Reading it.**
+- **When messages are sparse (10k/s), the strategies separate.**
+  - Spinning buys about 0.3 µs latency for a whole core.
+  - Blocking pays about 16 µs per message to wake from the kernel, and uses about a third of a core. Most of that is its 2,000-iteration spin phase before each sleep, which is the knob to turn.
+  - Backoff is cheapest in CPU but reacts in sleep-quantum time (hundreds of µs).
+- **When messages are dense (1M/s), they converge.** The consumer is never idle long enough to back off or sleep, so every strategy behaves like a spin.
+- **Yield on an otherwise idle machine is a spin**: `sched_yield` returns immediately when nothing else is runnable.
+- **p99 and above are not shown, deliberately.** In these single runs the tails come from VM scheduling of the sender (thousands of late sends) and vary by orders of magnitude between runs. They need a bare-metal, isolated-core run before they mean anything. macOS-native runs showed the same p50 ordering but are unpinned and noisier still.
+
 ## Limitations (read before quoting a number)
 
 - **Docker Desktop runs Linux in a VM.** vCPU→core placement is up to the hypervisor and can move between P- and E-cores. Pinning to vCPUs 2,3 does not guarantee two physical P-cores, let alone a known topology.

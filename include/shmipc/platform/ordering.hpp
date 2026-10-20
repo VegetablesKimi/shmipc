@@ -36,6 +36,13 @@ enum class OrderSite : unsigned {
   kSeqlockEnd = 9,      // writer: release-store of the even sequence after the data
   kSeqlockRead = 10,    // reader: acquire-load of the sequence before the copy
   kSeqlockValidate = 11,  // reader: acquire fence between the copy and re-reading the sequence
+  kMpscCommit = 12,     // producer: release-store of the record length after the record
+  kMpscConsume = 13,    // consumer: acquire-load of the record length before the record
+  kMpscRelease = 14,    // consumer: release-store of head after zeroing consumed space
+  kMpscReclaim = 15,    // producer: acquire-load of head before writing claimed space
+  kMpscHeadCache = 16,  // producers: release/acquire on the shared head cache
+  kDoorbellNotify = 17,  // notifier: seq_cst fence between publishing data and reading waiters
+  kDoorbellWait = 18,    // waiter: seq_cst fence between announcing itself and re-checking data
 };
 
 inline constexpr std::uint64_t kWeakenedOrderSites = SHMIPC_WEAKEN_ORDERING;

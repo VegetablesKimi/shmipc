@@ -16,6 +16,7 @@
 #include "shmipc/platform/ordering.hpp"
 #include "shmipc/proto/record.hpp"
 #include "shmipc/shm/layout.hpp"
+#include "shmipc/wait/doorbell.hpp"
 
 // One writer, any number of readers: the market-data fan-out shape.
 //
@@ -91,8 +92,9 @@ struct BroadcastState {
   BroadcastConfig config;
   BroadcastCounters counters;
   BroadcastWriterLine writer;
+  Doorbell bell;  // readers may sleep here; the writer notify()s
 };
-static_assert(sizeof(BroadcastState) == 3 * kFalseSharingRange);
+static_assert(sizeof(BroadcastState) == 4 * kFalseSharingRange);
 
 inline Word pack_header(std::int32_t length, std::uint16_t type) noexcept {
   const record::Header h{length, type, 0};
@@ -199,6 +201,10 @@ class Broadcast {
     std::size_t max_payload_size() const noexcept { return max_payload_; }
     std::uint64_t next_seq() const noexcept { return seq_; }
 
+    // Wakes readers sleeping in Blocking::wait. Every reader shares one
+    // doorbell, so this wakes them all.
+    void notify() const noexcept { s_->bell.notify(); }
+
    private:
     State* s_;
     detail::Word* words_;
@@ -281,6 +287,12 @@ class Broadcast {
         return Message{h.type, seq, lost, {buffer_.get(), len}};
       }
     }
+
+    // True if a record past our cursor is published (for wait predicates).
+    bool ready() const noexcept {
+      return s_->counters.tail.load(ordered(OrderSite::kBcastObserve, std::memory_order_acquire)) != cursor_;
+    }
+    Doorbell& doorbell() const noexcept { return s_->bell; }
 
     std::uint64_t lost_total() const noexcept { return lost_total_; }
     std::uint64_t laps() const noexcept { return laps_; }

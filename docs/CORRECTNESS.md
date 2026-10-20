@@ -16,7 +16,7 @@ Lock-free code is wrong in ways that ordinary tests rarely hit. This document li
 
 - Each atomic access carries `// SYNC(a -> b)`, naming the release side `a` and the acquire side `b` of the edge it belongs to.
 - Every acquire/release that matters is written as `ordered(OrderSite::kX, mo)`. Building with `-DSHMIPC_WEAKEN_ORDERING=<mask>` turns the selected sites into `relaxed`. A normal build compiles to exactly the order written, because the mask is a compile-time constant.
-- **No `seq_cst` anywhere so far.** No algorithm here needs store→load ordering. That will change with the futex waiter protocol (MS4).
+- **`seq_cst` appears in exactly one place:** the doorbell's two fences (§4b). That is the only store→load handshake in the library. Everything else is acquire/release or relaxed, each use justified at its `SYNC` comment.
 - **Racing copies are atomic.** Broadcast and seqlock readers copy memory that the writer may be overwriting at that moment. Those copies use relaxed `atomic_ref<uint64_t>` (`channel/atomic_copy.hpp`), never `memcpy`. A failed copy is then merely discarded rather than undefined behaviour, and TSan stays silent for the right reason.
 
 ## 2. SPSC (`SpscQueue<T>`, `SpscByteRing`)
@@ -57,6 +57,29 @@ This is the same fence-pairing argument as §3, with the version number in place
 - **Reader:** acquire `s1` (retry if odd) → copy → acquire fence → `s2` (relaxed) → accept iff `s1 == s2`.
 
 If any word read came from a later write, that write's odd store happens-before `s2`, so `s2 != s1`. If none did, the acquire of `s1` makes the complete write that ended at `s1` visible.
+
+## 4a. MPSC
+
+- **commit → consume** (`kMpscCommit` → `kMpscConsume`). A producer writes type and payload, then release-stores the positive length. The consumer acquires the length before reading the header and payload.
+- **release → reclaim** (`kMpscRelease` → `kMpscReclaim`). The consumer zeroes the consumed bytes, then release-stores `head`. A producer acquires `head` before writing into reclaimed space, so the zeroing happens-before its writes. Without this edge, a late zero store could erase a freshly written record.
+- **Head cache** (`kMpscHeadCache`). A producer that refreshed `head` republishes it with release, and other producers acquire it. Happens-before is transitive, so the consumer's zeroing reaches every producer that uses the cached value.
+- **Tail CAS: relaxed.** It arbitrates ownership of disjoint ranges and publishes nothing; the consumer never reads `tail`.
+- **No torn length.** The length word is accessed only atomically, whether written by a producer or polled by the consumer. The consumer's zeroing writes it plainly, but only for bytes no producer can touch until `head` is released.
+
+## 4b. Doorbell (no lost wakeups)
+
+The handshake needs **store→load** order on both sides:
+
+- **Notifier:** publish data, then fence(seq_cst), then load `waiters`.
+- **Waiter:** `waiters += 1`, then fence(seq_cst), then load the data (`ready()`).
+
+This is the store-buffering (SB) shape. Acquire/release does not forbid the outcome where both sides read the old value, and **neither does x86 TSO**, whose store buffer produces exactly that outcome. Only the two seq_cst fences do: they are totally ordered, so one of them comes first and the other side sees its store. The epoch protocol covers the window that remains between the waiter's check and its sleep:
+
+1. The waiter reads `epoch` before announcing itself.
+2. A notifier that saw `waiters > 0` bumps the epoch before waking.
+3. `futex_wait(epoch, e)` atomically refuses to sleep if the epoch has moved.
+
+A lost wakeup therefore needs both reads to return stale values, and the fences forbid that.
 
 ## 5. Bug-injection experiment
 
@@ -178,6 +201,27 @@ Raw output: [Neoverse-N2](results/weaken-gha-neoverse-n2.md), [EPYC](results/wea
    - A team testing only on Graviton/Neoverse would have shipped two of these bugs.
    - **One weak machine is not enough evidence. Two different microarchitectures are better, and exhaustive model checking (MS6) is the real answer.**
 3. **Nobody caught the two load→store edges.** `spsc.release` and `spsc.reclaim` (load buffering) survived on all four machines. Both edges remain required by the C++ and Arm models, so they are the first targets for model checking.
+
+### MS4 sites: MPSC and the doorbell
+
+60 s per row. Raw output: [M4 native](results/weaken-m4-macos-native-ms4.md), [M4 TSO VM](results/weaken-m4-linux-docker-tso-ms4.md).
+
+| weakened site | ordering it provides | M4 native (Arm) | M4 TSO VM |
+|---|---|---|---|
+| control | — | — (15 runs) | n/a |
+| `mpsc.commit` | payload stores → length store | **1 s** | — (54) |
+| `mpsc.consume` | length load → payload loads | **<1 s** | not run |
+| `mpsc.release` | zeroing → head store | — (59) | not run |
+| `mpsc.reclaim` | head load → claim writes | — (58) | not run |
+| `mpsc.headcache` | head-cache hand-off between producers | — (57) | not run |
+| `doorbell.notify` | publish store → `waiters` load (**store→load**) | **3 s** | **5 s** |
+| `doorbell.wait` | `waiters` RMW → data load (**store→load**) | **4 s** | — (14) |
+
+**Three things stand out.**
+
+1. **The pattern from MS3 repeats for MPSC.** Store→store and load→load edges (`commit`, `consume`) are caught at once on Arm. Load→store edges (`release`, `reclaim`, `headcache`) are not; they wait for model checking.
+2. **`doorbell.notify` fails even under TSO.** It is the only site in the library whose weakening is visible on TSO, because it guards a store→load order, and TSO's store buffer reorders exactly that. A Dekker-style handshake written with acquire/release would pass every x86-hosted test that ignores store buffering, and still lose wakeups.
+3. **`doorbell.wait` survives TSO only by accident.** On the waiter side, the fence follows `waiters.fetch_add`. Under TSO (as on x86), every atomic read-modify-write is a full barrier (a `LOCK`-prefixed instruction), so the RMW happens to provide the order the deleted fence was meant to give. Arm's `LDADD` has no such side effect, and the M4 loses a wakeup within 4 s. C++ guarantees neither behaviour for a relaxed RMW, which is why the fence stays.
 
 ## 6. Limits of this evidence
 
