@@ -10,6 +10,7 @@
 #include <span>
 #include <type_traits>
 
+#include "shmipc/platform/compiler.hpp"
 #include "shmipc/platform/cpu.hpp"
 #include "shmipc/platform/ordering.hpp"
 #include "shmipc/proto/record.hpp"
@@ -319,12 +320,17 @@ class SpscByteRing {
         head_cache_ = s_->idx.head.value.load(ordered(OrderSite::kSpscReclaim, std::memory_order_acquire));
         if (capacity_ - (claimed_ - head_cache_) < pad + size) return {};
       }
+      // Invariant: positions are 8-aligned (every record size is), so a
+      // header at any position fits before the end of the ring.
+      SHMIPC_ASSUME(claimed_ % record::kAlignment == 0);
       if (pad != 0) {
+        SHMIPC_ASSUME((claimed_ & mask_) + record::kHeaderSize <= capacity_);
         record::write_header(data_ + (claimed_ & mask_), static_cast<std::int32_t>(pad),
                              record::kPaddingType);
         claimed_ += pad;
       }
       std::byte* rec = data_ + (claimed_ & mask_);
+      SHMIPC_ASSUME((claimed_ & mask_) + size <= capacity_);
       record::write_header(rec, length, type);
       claimed_ += size;
       return {rec + record::kHeaderSize, len};

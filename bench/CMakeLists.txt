@@ -1,4 +1,5 @@
 include(FetchContent)
+include(GoogleTest)  # directory-scoped: needed here for gtest_discover_tests in this dir
 
 FetchContent_Declare(hdr_histogram
   URL https://github.com/HdrHistogram/HdrHistogram_c/archive/refs/tags/0.11.8.tar.gz
