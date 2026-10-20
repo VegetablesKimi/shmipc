@@ -18,7 +18,14 @@
 #include <stdbool.h>
 #include <stdint.h>
 
+/* GenMC's runtime header defines __VERIFIER_assume (as a macro over an
+ * internal builtin). Fall back to a declaration so that the models still
+ * compile for a plain syntax check outside GenMC. */
+#if __has_include(<genmc.h>)
+#include <genmc.h>
+#else
 void __VERIFIER_assume(int);
+#endif
 #define assume(c) __VERIFIER_assume(c)
 
 #ifdef DATA_ATOMIC
