@@ -1,0 +1,46 @@
+name: ci
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  linux:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-24.04, ubuntu-24.04-arm]
+        preset: [debug, release, asan, tsan]
+        compiler: [clang, gcc]
+        exclude:
+          # GCC's TSan adds little over Clang's and is slower; keep the matrix small.
+          - compiler: gcc
+            preset: tsan
+    runs-on: ${{ matrix.os }}
+    env:
+      CC: ${{ matrix.compiler == 'clang' && 'clang-18' || 'gcc-14' }}
+      CXX: ${{ matrix.compiler == 'clang' && 'clang++-18' || 'g++-14' }}
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install toolchain
+        run: sudo apt-get update && sudo apt-get install -y ninja-build clang-18 libclang-rt-18-dev g++-14
+      - name: Reduce ASLR entropy for TSan
+        # TSan's shadow mapping breaks with the 32-bit mmap randomisation of recent kernels.
+        if: matrix.preset == 'tsan'
+        run: sudo sysctl vm.mmap_rnd_bits=28
+      - run: cmake --preset ${{ matrix.preset }}
+      - run: cmake --build --preset ${{ matrix.preset }}
+      - run: ctest --preset ${{ matrix.preset }}
+
+  macos:
+    runs-on: macos-15
+    strategy:
+      fail-fast: false
+      matrix:
+        preset: [debug, asan]
+    steps:
+      - uses: actions/checkout@v4
+      - run: brew install ninja
+      - run: cmake --preset ${{ matrix.preset }}
+      - run: cmake --build --preset ${{ matrix.preset }}
+      - run: ctest --preset ${{ matrix.preset }}
