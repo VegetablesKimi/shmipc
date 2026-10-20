@@ -1,6 +1,9 @@
 #include "shmipc/platform/clock.hpp"
 
 #include <gtest/gtest.h>
+#include <sys/mman.h>
+#include <sys/wait.h>
+#include <unistd.h>
 
 #include <cmath>
 #include <string>
@@ -25,6 +28,29 @@ TEST(Clock, CounterNeverGoesBackOnOneThread) {
     ASSERT_GE(now, prev);
     prev = now;
   }
+}
+
+// Timestamps are compared across processes (open-loop benchmark), so a forked
+// child must read the same timebase as its parent. Raw CNTVCT_EL0 on macOS
+// fails this: the parent reads a 1 GHz scaled counter, the fork()ed child a
+// 24 MHz unscaled one.
+TEST(Clock, CounterIsSharedAcrossFork) {
+  auto* shared = static_cast<std::uint64_t*>(mmap(nullptr, sizeof(std::uint64_t),
+                                                  PROT_READ | PROT_WRITE,
+                                                  MAP_SHARED | MAP_ANONYMOUS, -1, 0));
+  ASSERT_NE(shared, MAP_FAILED);
+  const std::uint64_t before = read_counter();
+  const pid_t pid = fork();
+  if (pid == 0) {
+    *shared = read_counter();
+    _exit(0);
+  }
+  ASSERT_GT(pid, 0);
+  waitpid(pid, nullptr, 0);
+  const std::uint64_t after = read_counter();
+  EXPECT_LE(before, *shared);
+  EXPECT_LE(*shared, after);
+  munmap(shared, sizeof(std::uint64_t));
 }
 
 TEST(Clock, ExactConversionAtOneGigahertz) {

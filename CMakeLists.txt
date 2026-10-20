@@ -13,6 +13,7 @@ set(CMAKE_CXX_EXTENSIONS OFF)
 set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
 
 option(SHMIPC_BUILD_TESTS "Build the test suites" ${PROJECT_IS_TOP_LEVEL})
+option(SHMIPC_BUILD_BENCH "Build the benchmarks" ${PROJECT_IS_TOP_LEVEL})
 option(SHMIPC_WERROR "Treat warnings as errors" ${PROJECT_IS_TOP_LEVEL})
 set(SHMIPC_SANITIZER "" CACHE STRING "Sanitizers to enable: '', 'address,undefined' or 'thread'")
 # Bit mask of ordering sites (see include/shmipc/platform/ordering.hpp) that are
@@ -28,7 +29,11 @@ add_library(shmipc
   src/platform/affinity.cpp
   src/platform/clock.cpp
   src/platform/memory.cpp
+  src/platform/process.cpp
   src/platform/wait_on_address.cpp
+  src/result.cpp
+  src/shm/region.cpp
+  src/shm/segment.cpp
 )
 add_library(shmipc::shmipc ALIAS shmipc)
 target_include_directories(shmipc PUBLIC
@@ -48,4 +53,8 @@ endif()
 if(SHMIPC_BUILD_TESTS)
   enable_testing()
   add_subdirectory(tests)
+endif()
+
+if(SHMIPC_BUILD_BENCH)
+  add_subdirectory(bench)
 endif()

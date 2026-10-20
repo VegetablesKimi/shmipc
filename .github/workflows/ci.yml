@@ -31,6 +31,9 @@ jobs:
       - run: cmake --preset ${{ matrix.preset }}
       - run: cmake --build --preset ${{ matrix.preset }}
       - run: ctest --preset ${{ matrix.preset }}
+      - name: Benchmark smoke run (no thresholds; CI machines are too noisy)
+        if: matrix.preset == 'release'
+        run: QUICK=1 bench/scripts/run_all.sh ci
 
   macos:
     runs-on: macos-15

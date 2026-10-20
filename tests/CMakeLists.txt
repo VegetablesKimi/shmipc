@@ -8,18 +8,48 @@ FetchContent_Declare(googletest
   SYSTEM
 )
 set(INSTALL_GTEST OFF CACHE BOOL "" FORCE)
-FetchContent_MakeAvailable(googletest)
-# Third-party code: its own warnings are not ours to fix.
-target_compile_options(gtest PRIVATE -w)
-target_compile_options(gtest_main PRIVATE -w)
 
-add_executable(shmipc_unit_tests
-  unit/cpu_test.cpp
-  unit/clock_test.cpp
+# RapidCheck has no releases; pin a commit.
+FetchContent_Declare(rapidcheck
+  URL https://github.com/emil-e/rapidcheck/archive/2c3c4365aca21ef4e612768fdc95b1ce8b39a651.tar.gz
+  URL_HASH SHA256=d7c87d2a728b9cd7adec09aed44f34938cd1b0928b373f9b490c5b2f6d5ab9dc
+  DOWNLOAD_EXTRACT_TIMESTAMP ON
+  SYSTEM
+)
+set(RC_ENABLE_GTEST ON CACHE BOOL "" FORCE)
+
+FetchContent_MakeAvailable(googletest rapidcheck)
+# Third-party code: its own warnings are not ours to fix.
+foreach(dep gtest gtest_main rapidcheck)
+  target_compile_options(${dep} PRIVATE -w)
+endforeach()
+
+function(shmipc_test name label timeout)
+  add_executable(${name} ${ARGN})
+  target_link_libraries(${name} PRIVATE shmipc::shmipc GTest::gtest_main)
+  target_compile_options(${name} PRIVATE -Wall -Wextra $<$<BOOL:${SHMIPC_WERROR}>:-Werror>)
+  gtest_discover_tests(${name} PROPERTIES LABELS ${label} TIMEOUT ${timeout} DISCOVERY_MODE PRE_TEST)
+endfunction()
+
+shmipc_test(shmipc_unit_tests unit 60
   unit/affinity_test.cpp
+  unit/clock_test.cpp
+  unit/cpu_test.cpp
   unit/memory_test.cpp
+  unit/process_test.cpp
+  unit/record_test.cpp
+  unit/region_test.cpp
+  unit/segment_test.cpp
+  unit/spsc_byte_ring_test.cpp
+  unit/spsc_queue_test.cpp
   unit/wait_on_address_test.cpp
 )
-target_link_libraries(shmipc_unit_tests PRIVATE shmipc::shmipc GTest::gtest_main)
-target_compile_options(shmipc_unit_tests PRIVATE -Wall -Wextra $<$<BOOL:${SHMIPC_WERROR}>:-Werror>)
-gtest_discover_tests(shmipc_unit_tests PROPERTIES LABELS unit DISCOVERY_MODE PRE_TEST)
+
+shmipc_test(shmipc_property_tests property 300
+  property/spsc_property_test.cpp
+)
+target_link_libraries(shmipc_property_tests PRIVATE rapidcheck_gtest)
+
+shmipc_test(shmipc_stress_tests stress 600
+  stress/spsc_stress_test.cpp
+)

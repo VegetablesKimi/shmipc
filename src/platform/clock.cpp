@@ -9,7 +9,13 @@ namespace shmipc {
 
 std::uint64_t monotonic_ns() noexcept {
   timespec ts;
+#if defined(__APPLE__)
+  // macOS rounds CLOCK_MONOTONIC to whole microseconds. MONOTONIC_RAW reads
+  // mach_absolute_time and keeps nanosecond precision.
+  clock_gettime(CLOCK_MONOTONIC_RAW, &ts);
+#else
   clock_gettime(CLOCK_MONOTONIC, &ts);
+#endif
   return static_cast<std::uint64_t>(ts.tv_sec) * 1'000'000'000u +
          static_cast<std::uint64_t>(ts.tv_nsec);
 }
@@ -38,7 +44,12 @@ double CounterClock::effective_resolution_ns() const {
 }
 
 CounterClock CounterClock::calibrate(std::chrono::milliseconds window) {
-#if defined(__aarch64__)
+#if defined(__APPLE__)
+  (void)window;
+  mach_timebase_info_data_t tb;
+  mach_timebase_info(&tb);  // ns = ticks * numer / denom
+  return from_frequency(static_cast<std::uint64_t>(uint128_t{1'000'000'000u} * tb.denom / tb.numer));
+#elif defined(__aarch64__)
   (void)window;
   std::uint64_t hz;
   asm volatile("mrs %0, cntfrq_el0" : "=r"(hz));

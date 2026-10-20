@@ -26,6 +26,8 @@ namespace shmipc {
 enum class OrderSite : unsigned {
   kSpscPublish = 0,  // producer: release-store of tail after writing payload
   kSpscConsume = 1,  // consumer: acquire-load of tail before reading payload
+  kSpscRelease = 2,  // consumer: release-store of head after reading payload
+  kSpscReclaim = 3,  // producer: acquire-load of head before overwriting a slot
 };
 
 inline constexpr std::uint64_t kWeakenedOrderSites = SHMIPC_WEAKEN_ORDERING;
