@@ -109,7 +109,7 @@ Raw output: [results/weaken-m4-macos-native.md](results/weaken-m4-macos-native.m
 
 **Reading the results.**
 
-1. **12 of the 14 load-bearing sites are caught by the existing stress tests, most within one second.** The M4 really does reorder store→store and load→load, which x86 never does. The control build never failed.
+1. **10 of the 12 ordering sites are caught by the existing stress tests, most within one second.** The M4 really does reorder store→store and load→load, which x86 never does. The control build never failed.
 2. **The two misses are both load→store edges** (`spsc.release`, `spsc.reclaim`). Weakening either permits *load buffering*: a load is satisfied by a store that comes after it in another thread's program order. The Arm architecture allows this, but the hardware would have to make a store globally visible before an earlier load in the same thread has been satisfied. That is a much harder window to hit than the store→store and load→load reorderings above, and it was not observed here. **The edges are still required**: the C++ model and the Arm architecture both permit the outcome, and the compiler may legally reorder the code to produce it. This is precisely the case stress testing cannot settle and exhaustive model checking (MS6) can.
 3. **The validate-side load→load fences fail slowest** (`bcast.validate` 27 s, `seqlock.read` 4 s). Both need a speculative load to be satisfied early *and* the writer to land in a window of a few nanoseconds. Rare-but-real is the dangerous category: it would pass a short CI run and fail in production.
 
@@ -134,7 +134,50 @@ Raw output: [results/weaken-m4-linux-docker-arm64.md](results/weaken-m4-linux-do
 
 **Under TSO, every weakened build passes, even with all of a channel's orderings removed at once.** This is what makes ordering bugs dangerous for code developed on x86. TSO already provides store→store and load→load order, so a missing `release` or `acquire` is invisible until the code meets a weakly ordered CPU (or a compiler that exploits the weaker order).
 
-Pending: the same experiment on real Neoverse and real x86 runners, via the manual `ordering-experiment` GitHub workflow.
+### Four machines: two weakly ordered, two TSO
+
+The same experiment ran on GitHub-hosted runners via the manual `ordering-experiment` workflow (clang 18, 60 s per row). It added a second, unrelated Arm core and a real x86 core.
+
+**Memory model check first.** These are the litmus tests from `tests/experiments/litmus`, 2M rounds each. The MP rate depends on the harness's spin structure, so only zero versus non-zero is meaningful.
+
+| machine | MP (TSO forbids) | SB (TSO allows) | behaves as |
+|---|---:|---:|---|
+| Apple M4, macOS native | 337,873 / 3M | 6 | Arm (weak) |
+| Arm Neoverse-N2 (Azure, GitHub `ubuntu-24.04-arm`) | 1,989,611 / 2M | 15 | Arm (weak) |
+| Apple M4, Linux VM (Docker Desktop) | 0 / 3M | 35 | TSO |
+| AMD EPYC 9V74 (GitHub `ubuntu-24.04`) | 0 / 2M | 731 | TSO |
+
+**Bug injection.** "Caught" gives the time to the first failing run; "—" means no failure within 60 s, with the number of runs in brackets.
+
+| weakened site | M4 native | Neoverse-N2 | M4 TSO VM | EPYC x86 |
+|---|---|---|---|---|
+| control (nothing weakened) | — (24) | — (25) | — (30) | — (25) |
+| `spsc.publish` | **1 s** | **<1 s** | — (52) | — (33) |
+| `spsc.consume` | **2 s** | **run 1**¹ | — (52) | — (33) |
+| `spsc.release` | — (41) | — (43) | — (47) | — (33) |
+| `spsc.reclaim` | — (41) | — (45) | — (50) | — (33) |
+| `bcast.intent` | **1 s** | **<1 s** | — (171) | — (119) |
+| `bcast.publish` | **<1 s** | **<1 s** | — (93) | — (118) |
+| `bcast.observe` | **<1 s** | **<1 s** | — (92) | — (119) |
+| `bcast.validate` | **27 s** | **3 s** | — (92) | — (119) |
+| `seqlock.begin` | **<1 s** | **<1 s** | — (350) | — (452) |
+| `seqlock.end` | **<1 s** | — (200) | — (271) | — (454) |
+| `seqlock.read` | **4 s** | — (199) | — (299) | — (450) |
+| `seqlock.validate` | **1 s** | **<1 s** | — (283) | — (449) |
+| **sites caught (of 12)** | **10** | **8** | **0** | **0** |
+
+¹ The first run reported a bad message, and a later test in the same run then hung until the 180 s watchdog. A build with a missing acquire is allowed to hang (the consumer can act on stale indices), so the failure was detected in run 1, but its timestamp is not meaningful.
+
+Raw output: [Neoverse-N2](results/weaken-gha-neoverse-n2.md), [EPYC](results/weaken-gha-epyc-x86.md).
+
+**What the four machines show together.**
+
+1. **The ordering model decides whether the bugs are visible at all.** Both TSO machines, one of them the very same M4, pass every weakened build. That includes a real x86 server, where most production code is developed and tested.
+2. **Weak machines differ from each other.** Neoverse-N2 caught `bcast.validate` nine times faster than the M4. But it never caught `seqlock.end` or `seqlock.read` in about 200 runs each, and the M4 caught both within seconds.
+   - The union of the two catches 10 of 12 sites, which is everything the M4 alone catches.
+   - A team testing only on Graviton/Neoverse would have shipped two of these bugs.
+   - **One weak machine is not enough evidence. Two different microarchitectures are better, and exhaustive model checking (MS6) is the real answer.**
+3. **Nobody caught the two load→store edges.** `spsc.release` and `spsc.reclaim` (load buffering) survived on all four machines. Both edges remain required by the C++ and Arm models, so they are the first targets for model checking.
 
 ## 6. Limits of this evidence
 

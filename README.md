@@ -4,7 +4,7 @@ Low-latency inter-process messaging over shared memory, built for a trading stac
 
 > Status: milestone 3 of 7.
 > - **Done:** shared-memory segments; SPSC, broadcast (1 writer, N readers, exact loss reporting) and seqlock channels; unit, property and multi-process stress tests; first benchmarks.
-> - **Done:** a memory-ordering bug-injection experiment on Apple M4 ([CORRECTNESS.md](docs/CORRECTNESS.md) §5). Every acquire/release is weakened in turn, to check that the stress tests catch it.
+> - **Done:** a memory-ordering bug-injection experiment on four machines: Apple M4, Neoverse-N2, M4 in TSO mode, and AMD EPYC ([CORRECTNESS.md](docs/CORRECTNESS.md) §5). Every acquire/release is weakened in turn, to check that the stress tests catch it. Weakly ordered cores catch up to 10 of the 12 sites; TSO cores catch none.
 > - **Not started:** MPSC, wait strategies, fault recovery, model checking (milestones 4–6).
 > - **Documentation:** [design](docs/DESIGN.md), [correctness](docs/CORRECTNESS.md), [benchmarks](docs/BENCHMARKS.md) and [lessons](docs/LESSONS.md).
 
