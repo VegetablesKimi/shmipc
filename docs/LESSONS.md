@@ -52,3 +52,24 @@ The tolerance also had to change, to two ticks plus 2%. Both intervals are quant
 `CNTFRQ_EL0` on macOS reports 1 GHz, which suggests 1 ns ticks. Reading the counter in a tight loop shows it advancing in steps of about 42. The real resolution is the 24 MHz base clock, and the scaling only multiplies.
 
 `CounterClock::effective_resolution_ns()` measures the median step instead of trusting the register. Every benchmark result records that measured value.
+
+## 5. Docker's Linux VM on Apple silicon runs with TSO memory ordering (MS3)
+
+**Symptom.** In the bug-injection experiment, `spsc.publish` weakened to `relaxed` failed within 1 s on macOS. The same weakened build passed 52 consecutive runs in the arm64 Linux container on the *same* M4. The generated code was the same in both: payload stores, then a plain `str` of the tail.
+
+**Investigation.** The same two litmus tests, with relaxed atomics, 2–3M rounds each, natively and in the container:
+
+| test | outcome checked | TSO | Arm | macOS native | Linux VM (Docker) |
+|---|---|---|---|---:|---:|
+| message passing (MP) | reader sees flag but stale data | forbidden | allowed | **337,873** / 3M | **0** / 3M |
+| store buffering (SB) | both threads read 0 | allowed | allowed | 6 / 2M | 35 / 2M |
+
+The VM forbids exactly what TSO forbids and allows exactly what TSO allows. Its vCPUs are running in Apple silicon's hardware TSO mode, the mode Rosetta uses to run x86 code. Docker Desktop has "Use Rosetta for x86/amd64 emulation" enabled here, and the containers report their CPU as "VirtualApple".
+
+**Consequences.**
+- The plan assumed the arm64 container was a weak-memory test environment. **It is not.** On this machine, only *native macOS* processes run with Arm's weak ordering.
+- CI's `ubuntu-24.04-arm` runners (Neoverse) remain a genuine weakly ordered Linux target.
+- The container results become a useful control instead: same chip, same instruction stream, ordering mode switched to TSO. See CORRECTNESS.md §5.
+- Linux-VM benchmark numbers were measured in TSO mode, which can cost performance on Apple cores. BENCHMARKS.md notes this.
+
+**Takeaway.** "arm64" in `uname -m` describes the instruction set, not the memory model the code actually runs under. Check the environment with a litmus test before using it as evidence about ordering.

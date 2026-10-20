@@ -4,6 +4,7 @@
 //                           --cpus=A,B --iters=1000000 --warmup=100000
 //   shmipc_bench oneway     ... --rate=500000   (messages per second, open loop)
 //   shmipc_bench throughput ... --iters=10000000
+//   shmipc_bench copy       race-safe word copy vs memcpy, single thread
 //   common: --capacity=1024 --out=result.json
 //
 // pingpong   Round trip A -> B -> A, timed on A with one counter. No clock
@@ -33,6 +34,7 @@
 #include <type_traits>
 
 #include "cases/transports.hpp"
+#include "shmipc/channel/atomic_copy.hpp"
 #include "harness/env.hpp"
 #include "harness/histogram.hpp"
 #include "harness/options.hpp"
@@ -300,9 +302,43 @@ std::string result_json(const Params& p, const Outcome& o, const Environment& en
   return j.str();
 }
 
+// Cost of the race-safe copy used by broadcast and seqlock (relaxed atomic
+// 8-byte words) against memcpy, single-threaded with warm caches. It
+// isolates the code-generation cost from any coherence cost.
+int run_copy(const Options& opt) {
+  const std::uint64_t iters = opt.u64("iters", 5'000'000);
+  const CounterClock clk = CounterClock::calibrate();
+  alignas(64) static std::byte src[4096];
+  alignas(64) static detail::Word shared[512];
+  alignas(64) static std::byte dst[4096];
+  for (std::size_t i = 0; i < sizeof(src); ++i) src[i] = static_cast<std::byte>(i);
+
+  std::printf("| size | memcpy store+load | atomic words store+load | ratio |\n|---:|---:|---:|---:|\n");
+  for (std::size_t size : {16u, 64u, 256u, 1024u, 4096u}) {
+    auto time = [&](auto&& body) {
+      const std::uint64_t t0 = read_counter();
+      for (std::uint64_t i = 0; i < iters; ++i) {
+        body();
+        asm volatile("" ::: "memory");  // keep every iteration
+      }
+      return static_cast<double>(clk.to_ns(read_counter() - t0)) / static_cast<double>(iters);
+    };
+    const double plain = time([&] {
+      std::memcpy(shared, src, size);
+      std::memcpy(dst, shared, size);
+    });
+    const double atomic = time([&] {
+      detail::store_bytes(shared, src, size);
+      detail::load_bytes(dst, shared, size);
+    });
+    std::printf("| %zu B | %.1f ns | %.1f ns | %.2fx |\n", size, plain, atomic, atomic / plain);
+  }
+  return 0;
+}
+
 int usage(const std::string& err) {
   std::fprintf(stderr,
-               "error: %s\nusage: shmipc_bench pingpong|oneway|throughput --transport=shmipc|mutex "
+               "error: %s\nusage: shmipc_bench copy [--iters=N] | pingpong|oneway|throughput --transport=shmipc|mutex "
                "--mode=thread|process --size=16|64|256|1024 --cpus=A,B [--iters=N] [--warmup=N] "
                "[--rate=N] [--capacity=N] [--out=FILE]\n",
                err.c_str());
@@ -313,6 +349,7 @@ int run(int argc, char** argv) {
   std::string err;
   const auto opt = Options::parse(argc, argv, &err);
   if (!opt) return usage(err);
+  if (opt->command() == "copy") return run_copy(*opt);
 
   Params p;
   p.bench = opt->command();

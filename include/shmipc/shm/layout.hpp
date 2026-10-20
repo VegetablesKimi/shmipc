@@ -22,6 +22,7 @@ enum class ChannelKind : std::uint32_t {
   kSpscByteRing = 2,
   kBroadcast = 3,
   kMpsc = 4,
+  kSeqlock = 5,
 };
 
 enum class InitState : std::uint32_t {

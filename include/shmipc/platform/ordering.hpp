@@ -28,6 +28,14 @@ enum class OrderSite : unsigned {
   kSpscConsume = 1,  // consumer: acquire-load of tail before reading payload
   kSpscRelease = 2,  // consumer: release-store of head after reading payload
   kSpscReclaim = 3,  // producer: acquire-load of head before overwriting a slot
+  kBcastIntent = 4,     // writer: release fence between tail_intent and the record words
+  kBcastPublish = 5,    // writer: release-store of tail after the record words
+  kBcastObserve = 6,    // reader: acquire-load of tail before reading a record
+  kBcastValidate = 7,   // reader: acquire fence between the copy and re-reading tail_intent
+  kSeqlockBegin = 8,    // writer: release fence between the odd sequence and the data
+  kSeqlockEnd = 9,      // writer: release-store of the even sequence after the data
+  kSeqlockRead = 10,    // reader: acquire-load of the sequence before the copy
+  kSeqlockValidate = 11,  // reader: acquire fence between the copy and re-reading the sequence
 };
 
 inline constexpr std::uint64_t kWeakenedOrderSites = SHMIPC_WEAKEN_ORDERING;

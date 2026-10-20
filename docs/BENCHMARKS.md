@@ -73,9 +73,36 @@ Raw tables: [Linux VM, pinned](results/m4-linux-docker-pinned.md) and [macOS nat
 5. **The macOS mutex is ~10 µs per round trip, against ~1.3 µs in the Linux VM on the same chip.** This is a hypothesis that has not been verified yet. macOS's default pthread mutex policy is *fairshare*: an unlock hands the lock off, so a polling peer forces a scheduler round trip. Switching the baseline to `PTHREAD_MUTEX_POLICY_FIRSTFIT_NP` would test it.
 6. **Thread vs process makes no material difference.** This is expected: after `fork`, both modes run the same code on the same MAP_SHARED physical pages. The remaining differences (for example 410 vs 558 Mmsg/s at 16 B) are within run-to-run variance of single unpinned-host runs. Repeat runs are needed before reading anything into them.
 
+## Race-safe copy vs memcpy (MS3)
+
+Broadcast and seqlock readers copy memory that the writer may be overwriting, so they copy with relaxed 8-byte atomics instead of `memcpy` (CORRECTNESS.md §1). `shmipc_bench copy` measures the cost: one store and one load of the whole payload, single-threaded, warm L1, macOS native M4, two runs agreeing within 10%:
+
+| payload | memcpy | atomic words | ratio |
+|---:|---:|---:|---:|
+| 16 B | 3.8–4.2 ns | 2.7–2.9 ns | 0.7x |
+| 64 B | 2.9 ns | 9.4–10.4 ns | 3.5x |
+| 256 B | 5.0 ns | 35 ns | 7x |
+| 1024 B | 19 ns | 141–149 ns | 7.6x |
+| 4096 B | 75 ns | 535 ns | 7.1x |
+
+**Why.**
+- `memcpy` moves 32 bytes per instruction pair (`LDP`/`STP` of q registers). The atomic version moves 8, and the compiler is not allowed to merge or vectorise atomic accesses.
+- At 16 B, `memcpy` loses to its own call overhead with a runtime size.
+
+**What it means.**
+- For typical market-data messages (≤128 B) the cost is about 5–15 ns per reader per message. That is small next to the ~150 ns cache-line round trip that delivers the message.
+- For multi-KB payloads it dominates.
+
+**Options, not taken yet.**
+1. Copy 16 bytes at a time where the hardware guarantees single-copy atomicity for aligned 16-byte accesses (Arm LSE2, x86 AVX). This is not expressible portably in C++.
+2. An opt-in `memcpy` path that is formally a data race but is what many production seqlocks do in practice. It would need a separate TSan suppression and a clear warning.
+
+The choice is between conforming to the standard and getting bandwidth on large payloads. For now the default favours conformance.
+
 ## Limitations (read before quoting a number)
 
 - **Docker Desktop runs Linux in a VM.** vCPU→core placement is up to the hypervisor and can move between P- and E-cores. Pinning to vCPUs 2,3 does not guarantee two physical P-cores, let alone a known topology.
+- **The Linux VM runs in Apple's hardware TSO mode** (LESSONS.md #5), not with Arm's native weak ordering. TSO mode is what Rosetta uses and is generally believed to cost some performance. Linux-VM numbers are therefore TSO-mode numbers.
 - **macOS cannot pin threads at all**, so its numbers are unpinned.
 - **Turbo, C-states and the frequency governor are uncontrolled** on this machine.
 - **PMU counters are unavailable in the VM** (`perf stat` and `perf c2c`), so the analysis above infers coherence traffic rather than measuring it.

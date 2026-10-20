@@ -2,10 +2,11 @@
 
 Low-latency inter-process messaging over shared memory, built for a trading stack. It provides SPSC, MPSC, and broadcast channels, handles crashed and slow peers, has memory-ordering arguments that are checked on aarch64, and backs its claims with reproducible benchmarks.
 
-> Status: milestone 2 of 7.
-> - **Done:** shared-memory segments and both SPSC channels, with unit, property and multi-process stress tests, and the first benchmarks.
-> - **Not started:** broadcast, MPSC, wait strategies and fault recovery (milestones 3–5).
-> - **Documentation:** [design](docs/DESIGN.md), [benchmarks](docs/BENCHMARKS.md) and [lessons](docs/LESSONS.md).
+> Status: milestone 3 of 7.
+> - **Done:** shared-memory segments; SPSC, broadcast (1 writer, N readers, exact loss reporting) and seqlock channels; unit, property and multi-process stress tests; first benchmarks.
+> - **Done:** a memory-ordering bug-injection experiment on Apple M4 ([CORRECTNESS.md](docs/CORRECTNESS.md) §5). Every acquire/release is weakened in turn, to check that the stress tests catch it.
+> - **Not started:** MPSC, wait strategies, fault recovery, model checking (milestones 4–6).
+> - **Documentation:** [design](docs/DESIGN.md), [correctness](docs/CORRECTNESS.md), [benchmarks](docs/BENCHMARKS.md) and [lessons](docs/LESSONS.md).
 
 First numbers on an Apple M4 (Linux VM, pinned, 64-byte messages). These are directional only; see the limitations in BENCHMARKS.md.
 
@@ -42,10 +43,11 @@ docker/run.sh bash -c 'cmake --preset tsan && cmake --build --preset tsan && cte
 include/shmipc/platform/   cache-line constants, cpu_relax, counters, affinity, process identity, wait/wake
 include/shmipc/shm/        named segments, header and init protocol, offsets
 include/shmipc/proto/      record framing for variable-length channels
-include/shmipc/channel/    SpscQueue<T>, SpscByteRing, ShmChannel / LocalChannel
+include/shmipc/channel/    SpscQueue<T>, SpscByteRing, Broadcast, Seqlock<T>, ShmChannel / LocalChannel
 src/                       non-template code
 tests/                     unit, property (RapidCheck), stress (threads and processes)
 bench/                     harness (HdrHistogram, environment capture), cases, scripts
-docker/                    Linux dev image and run wrapper
+tests/experiments/         ordering bug-injection experiment
+docker/                    Linux dev image and run wrapper (PLATFORM=linux/amd64 for x86 via Rosetta)
 docs/                      design, correctness and benchmark write-ups
 ```

@@ -98,6 +98,39 @@ How the rings work:
   - Several claims may be batched under one `commit()`. If a claim fails while records are pending, the caller must `commit()` before retrying. Otherwise the ring can be full of records the consumer cannot see, and nobody makes progress (LESSONS.md #1).
 - **Restart.** A new `Producer` or `Consumer` handle resumes from the shared indices, so a restarted process continues where its predecessor stopped. Detecting that a peer died is MS5.
 
+## 4b. Broadcast (1 writer, N readers) *(MS3, done)*
+
+The semantics come first; DESIGN §2 explains why the writer must never block.
+
+- **The writer** never waits and does not know the readers exist. It overwrites the oldest data on wrap.
+- **Readers** keep private cursors. A late joiner starts at the current tail; joining late is not a loss.
+- **Every record carries a 64-bit sequence number.**
+  - A lapped reader resynchronises to the newest record (`latest`).
+  - Its next message reports `lost_before`, the exact number of messages it missed.
+  - A reader therefore always knows its gap, which is what a market-data consumer needs in order to decide whether to request a snapshot.
+- **Torn records are never returned.** This is the hard part. The reader cannot lock out the writer, so it copies first and validates afterwards:
+  1. Acquire `tail`.
+  2. Copy the header, seq and payload with relaxed atomic word loads.
+  3. Acquire fence.
+  4. Re-read `tail_intent`.
+  5. Reject the copy if `tail_intent - start > capacity`.
+
+  The writer stores `tail_intent`, then a release fence, then the record words. The two fences pair up, so a reader that observed even one overwritten word is guaranteed to see the new intent. CORRECTNESS.md §3 has the full argument.
+- **The copy uses relaxed atomics, not memcpy.** A memcpy that races with the writer is a data race in C++, which makes it UB even if the result is then discarded (Boehm, MSPC 2012). Relaxed 8-byte loads compile to plain `LDR`/`MOV`, so the cost is only losing SIMD-width copies.
+- **The header length is untrusted until validation.** It is bounds-checked before it is used, so a torn length cannot drive an out-of-bounds read.
+- **`tail_intent`, `tail` and `latest` share one cache line**, deliberately. They have one writer, and a reader touches the line once before its copy and once after. Padding separates different writers; here it would only add a miss.
+
+## 4c. Seqlock (latest value) *(MS3, done)*
+
+`Seqlock<T>` is a single-writer snapshot for top of book, limits or config. Readers always get a consistent recent `T`, and may skip intermediate versions.
+
+Writer and reader steps:
+
+- **Writer:** odd sequence (relaxed) → release fence → data words → even sequence (release).
+- **Reader:** acquire sequence (retry if odd) → copy → acquire fence → re-read sequence → accept only if unchanged.
+
+It uses the same fence pairing and the same relaxed-atomic copy as broadcast. If a writer dies mid-write, the odd sequence is left behind; a restarted writer skips past it. Readers spin until then, and handling that is MS5.
+
 ## 5. Record framing *(MS2, done)*
 
 ```

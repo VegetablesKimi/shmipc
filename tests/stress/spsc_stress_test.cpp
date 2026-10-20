@@ -57,6 +57,16 @@ void pin(int cpu) {
   if (affinity_supported() && online_cpu_count() > cpu) pin_this_thread(cpu);
 }
 
+// Set by a consumer that detects a bad message, so the producer stops instead
+// of spinning forever on a ring nobody drains. This matters in the
+// bug-injection builds, where failure is the expected outcome. Lives in
+// MAP_SHARED memory so forked children see it; reset at the start of each test.
+std::atomic<int>& abort_flag() {
+  static test::Shared<std::atomic<int>> flag(0);
+  return *flag;
+}
+bool aborted() { return abort_flag().load(std::memory_order_relaxed) != 0; }
+
 using Queue = SpscQueue<Msg>;
 
 void produce_queue(Queue::State& s, std::uint64_t n, bool batched) {
@@ -65,13 +75,17 @@ void produce_queue(Queue::State& s, std::uint64_t n, bool batched) {
   while (seq < n) {
     if (!batched) {
       const Msg m = make_msg(seq);
-      while (!p.try_push(m)) cpu_relax();
+      while (!p.try_push(m)) {
+        if (aborted()) return;
+        cpu_relax();
+      }
       ++seq;
       continue;
     }
     const auto want = static_cast<std::size_t>(1 + mix(seq) % 64);
     const auto span = p.try_claim(std::min<std::uint64_t>(want, n - seq));
     if (span.empty()) {
+      if (aborted()) return;
       cpu_relax();
       continue;
     }
@@ -101,6 +115,7 @@ std::uint64_t consume_queue(Queue::State& s, std::uint64_t n, bool batched) {
   }
   Msg extra;
   if (!bad && c.try_pop(extra)) bad = true;  // Nothing beyond n may appear.
+  if (bad) abort_flag().store(1, std::memory_order_relaxed);
   return bad ? 1 : 0;
 }
 
@@ -115,6 +130,7 @@ void produce_ring(Ring::State& s, std::uint64_t n, std::size_t max_len) {
       // The ring may be full of our own unpublished records; the consumer
       // cannot free space it cannot see. Publish before waiting.
       p.commit();
+      if (aborted()) return;
       cpu_relax();
     }
     for (std::size_t i = 0; i < len; ++i) dst[i] = rec_byte(seq, i);
@@ -139,6 +155,7 @@ std::uint64_t consume_ring(Ring::State& s, std::uint64_t n, std::size_t max_len)
     if (got == 0) cpu_relax();
   }
   if (!bad && c.try_peek()) bad = true;
+  if (bad) abort_flag().store(1, std::memory_order_relaxed);
   return bad ? 1 : 0;
 }
 
@@ -161,6 +178,7 @@ void run_threads(Produce produce, Consume consume) {
 // --- SpscQueue ---------------------------------------------------------------
 
 TEST(SpscStress, QueueThreads) {
+  abort_flag().store(0);
   const std::uint64_t n = test::stress_iterations(4'000'000);
   LocalChannel<Queue> ch({1024});
   run_threads([&] { produce_queue(ch.state(), n, false); },
@@ -168,6 +186,7 @@ TEST(SpscStress, QueueThreads) {
 }
 
 TEST(SpscStress, QueueThreadsBatched) {
+  abort_flag().store(0);
   const std::uint64_t n = test::stress_iterations(4'000'000);
   LocalChannel<Queue> ch({256});
   run_threads([&] { produce_queue(ch.state(), n, true); },
@@ -177,6 +196,7 @@ TEST(SpscStress, QueueThreadsBatched) {
 // Tiny ring: the two sides collide on every message, the worst case for the
 // cached-index logic.
 TEST(SpscStress, QueueThreadsCapacityTwo) {
+  abort_flag().store(0);
   const std::uint64_t n = test::stress_iterations(1'000'000);
   LocalChannel<Queue> ch({2});
   run_threads([&] { produce_queue(ch.state(), n, false); },
@@ -184,6 +204,7 @@ TEST(SpscStress, QueueThreadsCapacityTwo) {
 }
 
 TEST(SpscStress, QueueProcesses) {
+  abort_flag().store(0);
   const std::uint64_t n = test::stress_iterations(4'000'000);
   test::ScopedShmName name;
   auto ch = ShmChannel<Queue>::create(name, {1024});
@@ -205,6 +226,7 @@ TEST(SpscStress, QueueProcesses) {
 // --- SpscByteRing ------------------------------------------------------------
 
 TEST(SpscStress, ByteRingThreads) {
+  abort_flag().store(0);
   const std::uint64_t n = test::stress_iterations(2'000'000);
   LocalChannel<Ring> ch({4096});  // small: wraps (and pads) constantly
   run_threads([&] { produce_ring(ch.state(), n, 300); },
@@ -212,6 +234,7 @@ TEST(SpscStress, ByteRingThreads) {
 }
 
 TEST(SpscStress, ByteRingProcesses) {
+  abort_flag().store(0);
   const std::uint64_t n = test::stress_iterations(2'000'000);
   test::ScopedShmName name;
   auto ch = ShmChannel<Ring>::create(name, {4096});

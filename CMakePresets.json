@@ -6,7 +6,7 @@
       "name": "base",
       "hidden": true,
       "generator": "Ninja",
-      "binaryDir": "${sourceDir}/build/${hostSystemName}-${presetName}"
+      "binaryDir": "${sourceDir}/build/${hostSystemName}$env{SHMIPC_BUILD_TAG}-${presetName}"
     },
     {
       "name": "debug",

@@ -33,6 +33,7 @@ endfunction()
 
 shmipc_test(shmipc_unit_tests unit 60
   unit/affinity_test.cpp
+  unit/broadcast_test.cpp
   unit/clock_test.cpp
   unit/cpu_test.cpp
   unit/memory_test.cpp
@@ -40,16 +41,19 @@ shmipc_test(shmipc_unit_tests unit 60
   unit/record_test.cpp
   unit/region_test.cpp
   unit/segment_test.cpp
+  unit/seqlock_test.cpp
   unit/spsc_byte_ring_test.cpp
   unit/spsc_queue_test.cpp
   unit/wait_on_address_test.cpp
 )
 
 shmipc_test(shmipc_property_tests property 300
+  property/broadcast_property_test.cpp
   property/spsc_property_test.cpp
 )
 target_link_libraries(shmipc_property_tests PRIVATE rapidcheck_gtest)
 
 shmipc_test(shmipc_stress_tests stress 600
+  stress/broadcast_stress_test.cpp
   stress/spsc_stress_test.cpp
 )

@@ -1,6 +1,7 @@
 #pragma once
 
 #include <signal.h>
+#include <sys/mman.h>
 #include <sys/wait.h>
 #include <unistd.h>
 
@@ -9,7 +10,9 @@
 #include <cstdint>
 #include <cstdlib>
 #include <string>
+#include <new>
 #include <thread>
+#include <utility>
 
 #include "shmipc/shm/region.hpp"
 
@@ -61,6 +64,30 @@ inline int join(pid_t pid, std::chrono::milliseconds limit = std::chrono::second
     std::this_thread::sleep_for(std::chrono::milliseconds(1));
   }
 }
+
+// A T in MAP_SHARED anonymous memory: visible to threads and to children
+// forked after construction. Used for flags and per-worker results.
+template <class T>
+class Shared {
+ public:
+  template <class... Args>
+  explicit Shared(Args&&... args) {
+    void* p = mmap(nullptr, sizeof(T), PROT_READ | PROT_WRITE, MAP_SHARED | MAP_ANONYMOUS, -1, 0);
+    if (p == MAP_FAILED) std::abort();
+    ptr_ = new (p) T(std::forward<Args>(args)...);
+  }
+  ~Shared() {
+    ptr_->~T();
+    munmap(ptr_, sizeof(T));
+  }
+  Shared(const Shared&) = delete;
+  Shared& operator=(const Shared&) = delete;
+  T* operator->() const noexcept { return ptr_; }
+  T& operator*() const noexcept { return *ptr_; }
+
+ private:
+  T* ptr_;
+};
 
 // SplitMix64: a tiny, high-quality hash/PRNG step. Used to derive message
 // sizes and contents from a sequence number, so the consumer can recompute

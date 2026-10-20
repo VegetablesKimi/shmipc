@@ -1,0 +1,38 @@
+name: ordering-experiment
+
+# The memory-ordering bug-injection experiment (docs/CORRECTNESS.md §5) on
+# real hardware that the development machine lacks:
+#   ubuntu-24.04-arm  Arm Neoverse, natively weakly ordered
+#   ubuntu-24.04      x86-64, TSO
+# Manual only: it takes ~20 minutes per runner and is an experiment, not a gate.
+on:
+  workflow_dispatch:
+    inputs:
+      budget:
+        description: Seconds of stress per configuration
+        default: "60"
+
+jobs:
+  weaken:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-24.04-arm, ubuntu-24.04]
+    runs-on: ${{ matrix.os }}
+    env:
+      CC: clang-18
+      CXX: clang++-18
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install toolchain
+        run: sudo apt-get update && sudo apt-get install -y ninja-build clang-18
+      - name: Environment
+        run: |
+          lscpu | grep -E "Model name|Architecture|^CPU\(s\)"
+          tests/experiments/litmus/run.sh
+      - name: Experiment
+        run: BUDGET=${{ inputs.budget }} tests/experiments/weaken_ordering.sh gha-${{ matrix.os }}
+      - uses: actions/upload-artifact@v4
+        with:
+          name: weaken-${{ matrix.os }}
+          path: docs/results/weaken-gha-${{ matrix.os }}.md
