@@ -11,6 +11,7 @@
 #include <span>
 
 #include "shmipc/channel/atomic_copy.hpp"
+#include "shmipc/fault/liveness.hpp"
 #include "shmipc/platform/compiler.hpp"
 #include "shmipc/platform/cpu.hpp"
 #include "shmipc/platform/ordering.hpp"
@@ -93,8 +94,9 @@ struct BroadcastState {
   BroadcastCounters counters;
   BroadcastWriterLine writer;
   Doorbell bell;  // readers may sleep here; the writer notify()s
+  ParticipantSlot writer_slot;  // readers are not registered: there can be any number
 };
-static_assert(sizeof(BroadcastState) == 4 * kFalseSharingRange);
+static_assert(sizeof(BroadcastState) == 5 * kFalseSharingRange);
 
 inline Word pack_header(std::int32_t length, std::uint16_t type) noexcept {
   const record::Header h{length, type, 0};
@@ -156,7 +158,8 @@ class Broadcast {
           mask_(capacity_ - 1),
           max_payload_(max_payload(capacity_)),
           tail_(s.counters.tail.load(std::memory_order_relaxed)),
-          seq_(s.writer.next_seq) {}
+          seq_(s.writer.next_seq),
+          reg_(try_take_slot(s.writer_slot) ? Registration(&s.writer_slot) : Registration()) {}
 
     // Publishes one record and returns false only if the payload is too
     // large or the type is reserved. It never waits.
@@ -204,6 +207,7 @@ class Broadcast {
     // Wakes readers sleeping in Blocking::wait. Every reader shares one
     // doorbell, so this wakes them all.
     void notify() const noexcept { s_->bell.notify(); }
+    bool registered() const noexcept { return static_cast<bool>(reg_); }
 
    private:
     State* s_;
@@ -213,6 +217,7 @@ class Broadcast {
     std::size_t max_payload_;
     std::uint64_t tail_;
     std::uint64_t seq_;
+    Registration reg_;
   };
 
   struct Message {
@@ -293,6 +298,12 @@ class Broadcast {
       return s_->counters.tail.load(ordered(OrderSite::kBcastObserve, std::memory_order_acquire)) != cursor_;
     }
     Doorbell& doorbell() const noexcept { return s_->bell; }
+
+    // A reader that sees no new data can ask whether any is still coming.
+    // A writer crash never corrupts the ring for readers: a record is
+    // published only by the tail store, so a half-written record is
+    // invisible, and a restarted writer continues the sequence.
+    bool writer_alive() const noexcept { return liveness(s_->writer_slot) == Liveness::kAlive; }
 
     std::uint64_t lost_total() const noexcept { return lost_total_; }
     std::uint64_t laps() const noexcept { return laps_; }

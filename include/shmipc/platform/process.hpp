@@ -27,4 +27,9 @@ std::optional<std::uint64_t> process_start_time(std::int32_t pid) noexcept;
 // is why this does not use it.
 bool process_alive(const ProcessId& id) noexcept;
 
+// True if some running (non-zombie) process has this PID. Weaker than
+// process_alive: it cannot detect PID reuse. Used only where no start time
+// is available yet.
+bool pid_alive(std::int32_t pid) noexcept;
+
 }  // namespace shmipc

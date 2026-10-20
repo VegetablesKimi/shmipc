@@ -81,6 +81,24 @@ This is the store-buffering (SB) shape. Acquire/release does not forbid the outc
 
 A lost wakeup therefore needs both reads to return stale values, and the fences forbid that.
 
+## 4c. MPSC crash recovery (`unblock`)
+
+**Claim.** `unblock()` only ever converts space whose owner is dead. Producers can never write into converted space.
+
+- **`length < 0` case.** The header was installed by its owner's CAS, with an owner tag of slot index plus generation (low 8 bits). The consumer converts only if that owner is dead:
+  - the slot's generation no longer matches the tag (the slot was released or reclaimed, which happens only after its owner unregisters or dies), or
+  - the slot's process is dead, and the slot word is unchanged across the PID read (a seqlock-style check against a concurrent reclaim).
+
+  A dead owner writes nothing more, so the conversion CAS cannot race with it.
+- **`length == 0` case.** Stuck at a zero word with `tail > head` means some producer completed the tail CAS for this space but has not installed its header.
+  1. Every producer sets `claiming = 1` before its tail CAS, and the CAS is a release on success. The consumer reads `tail` with an acquire RMW (the latest value), so it sees `claiming = 1` for every producer whose CAS it observes.
+  2. If any producer with `claiming = 1` is alive, it may own this space: the consumer waits (`kOwnerAlive`).
+  3. Otherwise the owner is one of the dead claimers. The consumer sizes the claim by scanning for the next non-zero header word. The dead region is all zeros, because the consumer zeroed it on release and its owner wrote nothing. The next live claim already has its header installed, because no live producer is mid-claim. So the first non-zero word is exactly the next record.
+  4. The consumer installs padding by CAS `0 → pad`.
+- **Defence in depth.** If a producer were ever wrongly judged dead, its header CAS (`0 → -len`) would fail against the consumer's padding, and it would return a failed claim rather than write.
+- **Stale flags.** `claiming` stays set on a producer that died before its CAS. `unblock()` clears dead producers' flags only when the ring is empty, which it reads with an RMW, so no completed claim can be pending. A slot with `claiming = 1` cannot be reclaimed until then, so the evidence of an unresolved claim is never erased.
+- **Limit.** The 8-bit generation tag could alias if a slot were re-registered a multiple of 256 times while one dead claim stayed unresolved. The consumer resolves stalls in milliseconds, so this needs 256 producer restarts in that window.
+
 ## 5. Bug-injection experiment
 
 **Question.** Do the stress tests actually depend on each ordering they claim to need? A stress test that passes with every `release` turned into `relaxed` proves nothing about the orderings.

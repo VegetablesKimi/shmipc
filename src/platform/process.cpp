@@ -73,6 +73,12 @@ std::optional<std::uint64_t> process_start_time(std::int32_t pid) noexcept {
   return info->start_time;
 }
 
+bool pid_alive(std::int32_t pid) noexcept {
+  if (pid <= 0) return false;
+  const auto info = query(pid);
+  return info && !info->zombie;
+}
+
 bool process_alive(const ProcessId& id) noexcept {
   if (id.pid <= 0) return false;
   const auto info = query(id.pid);

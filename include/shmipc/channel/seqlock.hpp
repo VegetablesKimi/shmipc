@@ -8,6 +8,7 @@
 #include <type_traits>
 
 #include "shmipc/channel/atomic_copy.hpp"
+#include "shmipc/fault/liveness.hpp"
 #include "shmipc/platform/cpu.hpp"
 #include "shmipc/platform/ordering.hpp"
 #include "shmipc/shm/layout.hpp"
@@ -50,6 +51,7 @@ class Seqlock {
 
   struct State {
     alignas(kFalseSharingRange) std::atomic<std::uint64_t> seq;
+    ParticipantSlot writer_slot;
     // The data starts on the next line, so a reader polling `seq` does not
     // bounce the data line on every write. The reader then pays two misses
     // per changed snapshot; the alternative (one line) only wins for tiny T
@@ -74,9 +76,13 @@ class Seqlock {
 
   class Writer {
    public:
-    explicit Writer(State& s) noexcept : s_(&s), seq_(s.seq.load(std::memory_order_relaxed)) {
+    explicit Writer(State& s) noexcept
+        : s_(&s),
+          seq_(s.seq.load(std::memory_order_relaxed)),
+          reg_(try_take_slot(s.writer_slot) ? Registration(&s.writer_slot) : Registration()) {
       if (seq_ & 1) ++seq_;  // A previous writer died mid-write; its snapshot is abandoned.
     }
+    bool registered() const noexcept { return static_cast<bool>(reg_); }
 
     void write(const T& v) noexcept {
       // SYNC(seqlock.begin -> seqlock.validate): a reader that sees any data
@@ -95,6 +101,7 @@ class Seqlock {
    private:
     State* s_;
     std::uint64_t seq_;
+    Registration reg_;
   };
 
   class Reader {
@@ -119,13 +126,16 @@ class Seqlock {
     }
 
     // Spins until a consistent snapshot is read. Writes are short, so this
-    // terminates quickly unless the writer died mid-write (then: forever;
-    // fault handling is MS5).
+    // terminates quickly. If the writer died mid-write, the sequence stays
+    // odd until a new writer starts; readers that must not hang should use
+    // try_read and check writer_alive().
     T read(std::uint64_t* version = nullptr) const noexcept {
       T v;
       while (!try_read(v, version)) cpu_relax();
       return v;
     }
+
+    bool writer_alive() const noexcept { return liveness(s_->writer_slot) == Liveness::kAlive; }
 
     // Version of the newest complete snapshot (0 = never written), without copying.
     std::uint64_t version() const noexcept {

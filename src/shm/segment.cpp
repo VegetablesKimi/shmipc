@@ -52,6 +52,20 @@ Result<Segment> Segment::create(const std::string& name, const LayoutParams& par
   return Segment(std::move(region).value(), /*creator=*/true);
 }
 
+bool Segment::remove_if_stale(const std::string& name) noexcept {
+  MapOptions no_prefault;
+  no_prefault.prefault = false;
+  auto region = ShmRegion::open(name, no_prefault);
+  if (!region || region->size() < kPayloadOffset) return false;
+  const SegmentHeader* h = header_at(region->data());
+  // SYNC(segment.initializing -> attach.check_creator)
+  if (h->init_state.load(std::memory_order_acquire) != static_cast<std::uint32_t>(InitState::kInitializing)) {
+    return false;  // READY (in use), or UNINIT (creator identity not written yet: cannot judge)
+  }
+  if (process_alive(ProcessId{h->creator_pid, h->creator_start_time})) return false;
+  return ShmRegion::remove(name);
+}
+
 void Segment::publish_ready() noexcept {
   WaitWord& state = header().init_state;
   // SYNC(segment.ready -> attach.ready): the channel state constructed in the

@@ -176,16 +176,33 @@ How a record is published differs per channel:
 - An ordering that is load-bearing, rather than merely conservative, is written as `ordered(OrderSite::kX, mo)`. The bug-injection build can then weaken it (`-DSHMIPC_WEAKEN_ORDERING=<mask>`) to show that the stress tests catch the resulting bug on aarch64.
 - `seq_cst` is used only where a store→load ordering is needed (Dekker-style), and each such use is justified in a comment.
 
-## 7. Fault model *(MS5)*
+## 7. Fault model *(MS5, done)*
 
-| Failure | Detection | Recovery |
-|---|---|---|
-| MPSC producer dies between claim and commit | consumer stalls at one position longer than T, and the producer's liveness check fails | CAS the record into PADDING and skip it |
-| SPSC consumer dies | heartbeat timeout and liveness check | producer gets `kPeerDead`; the restarted consumer bumps the epoch |
-| Broadcast reader lapped | `tail_intent - cursor > capacity` after the copy | `Overrun{from, to}`; the cursor jumps forward |
-| Creator dies during init | attacher times out waiting for READY | the segment is treated as stale and recreated |
+**Liveness is process identity, not a timeout.**
+- Every endpoint registers in a `ParticipantSlot` in the channel's shared state. A slot holds a word with the state, PID and generation, plus the process start time.
+- A peer is dead when its PID is gone, is a zombie, or now belongs to a process with a different start time (PID reuse).
+- There is no heartbeat. On one host, process identity is definitive, and a timeout could only declare a live-but-slow process dead. For MPSC that would mean revoking a claim its owner is still writing: silent corruption.
+- Assumption: all participants share a PID namespace.
 
-The liveness check combines PID with process start time, which defeats PID reuse, plus a heartbeat counter. A timeout on its own would kill producers that are alive but slow.
+| failure | detection | recovery | evidence |
+|---|---|---|---|
+| MPSC producer dies after its header CAS, before commit (`length < 0`) | the consumer stalls; the header's owner tag (slot, generation) names a dead owner | `unblock()` CASes the header into padding | `MpscUnblock.DeadOwnerWithHeader`, chaos |
+| MPSC producer dies between the tail CAS and the header CAS (`length == 0`) | the stall is at a zero word with `tail` beyond it; some dead producer has `claiming = 1` and no live one does | `unblock()` sizes the claim up to the next installed header and CASes a padding header into the zero word | `MpscUnblock.DeadOwnerWithoutHeader`, chaos with fault points |
+| MPSC producer slow but alive | owner alive | never revoked (`kOwnerAlive`) | `MpscUnblock.LiveOwnerIsNeverRevoked` |
+| SPSC consumer dies | `Producer::consumer_alive()` | a restarted consumer resumes from the shared `head`; messages read but not released are redelivered (**at-least-once**) | `SpscChaos.ConsumerKilled…` (3,000 kills) |
+| SPSC producer dies | `Consumer::producer_alive()` | a restarted producer resumes from the shared `tail` (`published()`); an unpublished message is simply written again (**exactly-once**) | `SpscChaos.ProducerKilled…` (3,000 kills) |
+| Broadcast writer dies | `Receiver::writer_alive()` | a half-written record is invisible (tail never moved); a new writer continues the sequence | unit tests |
+| Seqlock writer dies mid-write | `Reader::writer_alive()`; the sequence stays odd | a new `Writer` skips the odd sequence | `Seqlock.OddSequenceMeansWriteInProgress` |
+| Broadcast reader lapped | `tail_intent - cursor > capacity` | resync to `latest`; exact `lost_before` | MS3 |
+| Creator dies during init | attach sees `kInitializing` with a dead creator | `Segment::remove_if_stale`, or `create_or_attach` with `reclaim_stale` | `StaleSegment.*` |
+| Process dies mid-registration | slot in `kRegistering` whose PID (in the CAS word) is dead | slot reclaimable | LESSONS.md #7 |
+
+**Why every conversion is a CAS on the header word.** Producers install headers by CAS (`0 → {-len, type, owner}`), and the consumer converts by CAS (`{-len…} → padding` or `0 → padding`). If a producer were ever wrongly judged dead, exactly one side would win, and the producer would see its claim revoked rather than write into space the consumer has given away. The liveness rules should make that impossible. The CAS keeps the safety argument local instead of depending on them.
+
+**Chaos results.** 10,000 SIGKILLs per run, about 40% landing on fault-injection points inside the claim protocol:
+- 0 lost, duplicated, reordered or corrupt records;
+- about 5,000 stalls resolved by `unblock()`;
+- maximum recovery time from stall to progress under 11 ms on an M4.
 
 ## 8. Wait strategies *(MS4, done)*
 

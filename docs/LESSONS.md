@@ -94,3 +94,22 @@ In SPSC the producer owns both its tail and its cache, so `tail - head_cache <= 
 - Model-based tests check *sequential* logic. This bug needed a specific interleaving of two producers, so only the concurrent stress test could find it (and a model checker would have, MS6).
 - When copying an invariant-based check into a setting with more writers, re-derive the invariant, here `used <= capacity`.
 - Agrona computes the same quantity in a signed `int`, which turns the underflow into a negative number that fails the check. The C++ port with unsigned `uint64_t` lost that protection silently.
+
+## 7. "Leaks a slot, acceptable" was not acceptable (MS5)
+
+**Symptom.** In the SPSC chaos test, after a few thousand random kills of the consumer, `producer.consumer_alive()` started returning true right after the consumer had been SIGKILLed and reaped. It then stayed true for the rest of the run.
+
+**Cause.** Registration took a participant slot by CASing its state to `kRegistering`, wrote the PID and start time, then published `kActive`. A process killed between the CAS and the publish left the slot in `kRegistering` for good. `kRegistering` has to count as alive, because a registrant mid-registration is alive. The slot therefore could never be reclaimed, and it reported a dead process as a live peer. The code comment had called this "leaks a slot; acceptable". With thousands of kills the few-instruction window was hit, and the "leak" turned into a permanently wrong liveness answer.
+
+**Fix.** The registrant's PID now goes into the same 64-bit word as the state and generation, so it is written by the CAS itself. A `kRegistering` slot whose PID no longer exists is dead and can be reclaimed. The CAS still checks state, PID and generation together, so reclaiming cannot race with a live registrant.
+
+**Takeaway.**
+- In crash recovery, "this window is only a few instructions wide" is not an argument. Chaos testing at scale hits every window.
+- Any state a process can be killed in must be recognisable as abandoned by someone else.
+- Write the evidence of ownership in the same atomic step that takes ownership.
+
+## 8. A test's bookkeeping can manufacture the bug it looks for (MS5)
+
+The SPSC consumer chaos test briefly reported "gaps" (skipped messages). The child consumer popped a message, which reads and releases it, and only then recorded "last processed". A kill between the two made the log say the instance had processed one message fewer than it had released.
+
+The library was right. The fix was to record first, then release, which makes a kill in between a redelivery, the documented at-least-once behaviour. When a chaos test fails, first ask whether the observer is crash-consistent too.

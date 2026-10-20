@@ -36,6 +36,7 @@ shmipc_test(shmipc_unit_tests unit 60
   unit/broadcast_test.cpp
   unit/clock_test.cpp
   unit/cpu_test.cpp
+  unit/liveness_test.cpp
   unit/memory_test.cpp
   unit/mpsc_test.cpp
   unit/process_test.cpp
@@ -61,3 +62,16 @@ shmipc_test(shmipc_stress_tests stress 600
   stress/mpsc_stress_test.cpp
   stress/spsc_stress_test.cpp
 )
+
+# Crash-recovery tests. SHMIPC_FAULT_INJECTION turns the SHMIPC_FAULT_POINT
+# markers in the (header-only) channels into hooks that a child process can use
+# to die at an exact protocol step.
+shmipc_test(shmipc_fault_tests unit 120
+  fault/mpsc_unblock_test.cpp
+)
+target_compile_definitions(shmipc_fault_tests PRIVATE SHMIPC_FAULT_INJECTION)
+
+shmipc_test(shmipc_chaos_tests chaos 900
+  chaos/chaos_test.cpp
+)
+target_compile_definitions(shmipc_chaos_tests PRIVATE SHMIPC_FAULT_INJECTION)

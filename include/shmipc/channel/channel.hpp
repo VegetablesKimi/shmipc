@@ -51,12 +51,17 @@ class ShmChannel {
   }
 
   // Whichever of several racing processes wins O_EXCL becomes the creator;
-  // the rest attach.
+  // the rest attach. With opts.reclaim_stale, a segment left behind by a
+  // creator that died during initialisation is removed and created anew
+  // (see Segment::remove_if_stale for the race this implies).
   static Result<ShmChannel> create_or_attach(const std::string& name, const Config& cfg,
                                              const SegmentOptions& opts = {}) {
     auto created = create(name, cfg, opts);
     if (created || created.error().code != Errc::kExists) return created;
-    return attach(name, cfg, opts);
+    auto attached = attach(name, cfg, opts);
+    if (attached || !opts.reclaim_stale || attached.error().code != Errc::kStaleCreator) return attached;
+    if (!Segment::remove_if_stale(name)) return attached;
+    return create(name, cfg, opts);
   }
 
   typename C::State& state() const noexcept { return *state_; }

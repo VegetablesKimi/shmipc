@@ -30,6 +30,7 @@ add_library(shmipc
   src/platform/clock.cpp
   src/platform/memory.cpp
   src/platform/process.cpp
+  src/fault/liveness.cpp
   src/platform/wait_on_address.cpp
   src/result.cpp
   src/shm/region.cpp

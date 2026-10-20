@@ -10,6 +10,7 @@
 #include <span>
 #include <type_traits>
 
+#include "shmipc/fault/liveness.hpp"
 #include "shmipc/platform/compiler.hpp"
 #include "shmipc/platform/cpu.hpp"
 #include "shmipc/platform/ordering.hpp"
@@ -66,8 +67,17 @@ struct SpscState {
   SpscConfigLine config;
   SpscIndices idx;
   Doorbell bell;  // the consumer sleeps here under Blocking; the producer notify()s
+  ParticipantSlot producer_slot;
+  ParticipantSlot consumer_slot;
 };
-static_assert(sizeof(SpscState) == 4 * kFalseSharingRange);
+static_assert(sizeof(SpscState) == 6 * kFalseSharingRange);
+
+// Takes a fixed endpoint slot. Fails (empty Registration) if a live process
+// already holds it, which means a second producer or consumer on an SPSC
+// channel: a usage error the caller can detect with registered().
+inline Registration take_endpoint(ParticipantSlot& slot) noexcept {
+  return try_take_slot(slot) ? Registration(&slot) : Registration();
+}
 static_assert(std::atomic<std::uint64_t>::is_always_lock_free);
 
 inline SpscState* construct_spsc_state(std::byte* mem, std::uint64_t capacity) noexcept {
@@ -124,7 +134,8 @@ class SpscQueue {
           mask_(capacity_ - 1),
           // A restarted producer resumes where the previous one published.
           tail_(s.idx.tail.value.load(std::memory_order_relaxed)),
-          head_cache_(s.idx.head.value.load(std::memory_order_acquire)) {}
+          head_cache_(s.idx.head.value.load(std::memory_order_acquire)),
+          reg_(detail::take_endpoint(s.producer_slot)) {}
 
     // Up to `max` contiguous free slots, or an empty span if the ring is
     // full. Shorter than `max` at the wrap point or when space is short. Fill
@@ -162,6 +173,18 @@ class SpscQueue {
     // Wakes a consumer sleeping in Blocking::wait (see wait/doorbell.hpp).
     void notify() const noexcept { s_->bell.notify(); }
 
+    // For a producer facing a full ring: is anyone going to drain it? False
+    // if no consumer is registered or the registered one has died. Not
+    // called on the hot path. A restarted consumer resumes from the shared
+    // head, so messages it had read but not yet released are delivered
+    // again (at-least-once across consumer restarts).
+    bool consumer_alive() const noexcept { return liveness(s_->consumer_slot) == Liveness::kAlive; }
+    bool registered() const noexcept { return static_cast<bool>(reg_); }
+
+    // Messages published so far on this channel, by this and every earlier
+    // producer: where a restarted producer continues.
+    std::uint64_t published() const noexcept { return tail_; }
+
     std::uint64_t capacity() const noexcept { return capacity_; }
 
    private:
@@ -171,6 +194,7 @@ class SpscQueue {
     std::uint64_t mask_;
     std::uint64_t tail_;        // our own index: no need to re-read it
     std::uint64_t head_cache_;  // stale copy of the consumer's index
+    Registration reg_;
   };
 
   class Consumer {
@@ -181,7 +205,8 @@ class SpscQueue {
           capacity_(s.config.capacity),
           mask_(capacity_ - 1),
           head_(s.idx.head.value.load(std::memory_order_relaxed)),
-          tail_cache_(s.idx.tail.value.load(std::memory_order_acquire)) {}
+          tail_cache_(s.idx.tail.value.load(std::memory_order_acquire)),
+          reg_(detail::take_endpoint(s.consumer_slot)) {}
 
     // Up to `max` contiguous readable slots, or an empty span if the ring is
     // empty. The slots stay valid until release().
@@ -215,6 +240,8 @@ class SpscQueue {
     }
 
     Doorbell& doorbell() const noexcept { return s_->bell; }
+    bool producer_alive() const noexcept { return liveness(s_->producer_slot) == Liveness::kAlive; }
+    bool registered() const noexcept { return static_cast<bool>(reg_); }
 
     // Calls f(const T&) for up to `max` messages, releasing them with a single
     // store. Returns how many were consumed.
@@ -241,6 +268,7 @@ class SpscQueue {
     std::uint64_t mask_;
     std::uint64_t head_;
     std::uint64_t tail_cache_;
+    Registration reg_;
   };
 
  private:
@@ -302,7 +330,8 @@ class SpscByteRing {
           mask_(capacity_ - 1),
           max_payload_(max_payload(capacity_)),
           claimed_(s.idx.tail.value.load(std::memory_order_relaxed)),
-          head_cache_(s.idx.head.value.load(std::memory_order_acquire)) {}
+          head_cache_(s.idx.head.value.load(std::memory_order_acquire)),
+          reg_(detail::take_endpoint(s.producer_slot)) {}
 
     // Reserves a record with a `len`-byte payload and returns the payload
     // bytes to fill, or an empty span if the ring lacks space (or len exceeds
@@ -362,6 +391,8 @@ class SpscByteRing {
     std::size_t max_payload_size() const noexcept { return max_payload_; }
 
     void notify() const noexcept { s_->bell.notify(); }
+    bool consumer_alive() const noexcept { return liveness(s_->consumer_slot) == Liveness::kAlive; }
+    bool registered() const noexcept { return static_cast<bool>(reg_); }
 
    private:
     State* s_;
@@ -371,6 +402,7 @@ class SpscByteRing {
     std::size_t max_payload_;
     std::uint64_t claimed_;  // tail including claimed-but-unpublished records
     std::uint64_t head_cache_;
+    Registration reg_;
   };
 
   class Consumer {
@@ -380,7 +412,8 @@ class SpscByteRing {
           data_(data_of(s)),
           mask_(s.config.capacity - 1),
           head_(s.idx.head.value.load(std::memory_order_relaxed)),
-          tail_cache_(s.idx.tail.value.load(std::memory_order_acquire)) {}
+          tail_cache_(s.idx.tail.value.load(std::memory_order_acquire)),
+          reg_(detail::take_endpoint(s.consumer_slot)) {}
 
     // The next record, or nullopt if none is published. Padding is skipped
     // and never returned. The view stays valid until release().
@@ -414,6 +447,8 @@ class SpscByteRing {
     }
 
     Doorbell& doorbell() const noexcept { return s_->bell; }
+    bool producer_alive() const noexcept { return liveness(s_->producer_slot) == Liveness::kAlive; }
+    bool registered() const noexcept { return static_cast<bool>(reg_); }
 
     // Calls f(const RecordView&) for up to `max` records, then releases them
     // all with one store. Returns how many were consumed.
@@ -440,6 +475,7 @@ class SpscByteRing {
     std::uint64_t head_;
     std::uint64_t tail_cache_;
     std::uint64_t current_size_ = 0;
+    Registration reg_;
   };
 
  private:
