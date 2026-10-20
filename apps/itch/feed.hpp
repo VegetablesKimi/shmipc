@@ -76,8 +76,11 @@ inline std::vector<std::byte> generate(const GenOptions& opt) {
   emit('S', 0, [](std::byte* m) { m[11] = static_cast<std::byte>('O'); });
   for (std::uint16_t s = 1; s <= opt.symbols; ++s) {
     emit('R', s, [&](std::byte* m) {
-      char name[9];
-      std::snprintf(name, sizeof(name), "SYM%04u ", static_cast<unsigned>(s));
+      // ITCH stock fields are exactly 8 characters. "SYM%05u" is 8 for every
+      // 16-bit locate (an earlier "SYM%04u " overflowed past 9999; gcc's
+      // -Wformat-truncation caught it, clang did not).
+      char name[16];
+      std::snprintf(name, sizeof(name), "SYM%05u", static_cast<unsigned>(s));
       std::memcpy(m + 11, name, 8);
     });
   }
