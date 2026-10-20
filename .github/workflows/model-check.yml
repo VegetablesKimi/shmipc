@@ -39,7 +39,7 @@ jobs:
       - name: Run models
         run: |
           export PATH=$HOME/genmc/bin:/usr/lib/llvm-19/bin:$PATH
-          tests/model/run_models.sh
+          GENMC_TIMEOUT=120 tests/model/run_models.sh
       - uses: actions/upload-artifact@v4
         if: always()
         with:

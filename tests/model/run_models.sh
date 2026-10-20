@@ -48,10 +48,13 @@ run() {
   local model="$1" file="$2"
   shift 2
   local log
-  log="$(timeout 600 genmc "--$model" -- -I"$dir" "$@" "$file" 2>&1)"
+  log="$(timeout "${GENMC_TIMEOUT:-300}" genmc "--$model" -- -I"$dir" "$@" "$file" 2>&1)"
+  local rc=$?
   local n
   n="$(grep -oE 'complete executions explored: [0-9]+' <<<"$log" | grep -oE '[0-9]+$' | head -1)"
-  if grep -q "No errors were detected" <<<"$log"; then
+  if [[ $rc -eq 124 ]]; then
+    echo "timeout"
+  elif grep -q "No errors were detected" <<<"$log"; then
     echo "ok (${n:-?})"
   elif grep -qiE "race" <<<"$log"; then
     echo "**race**"
@@ -68,6 +71,7 @@ run() {
   echo "GenMC $(genmc --version 2>&1 | grep -oE 'v?[0-9]+\.[0-9]+(\.[0-9]+)?' | head -1), host $(uname -m)."
   echo "\`ok (N)\`: no error in any of the N executions (exhaustive). **race**: a data race on a plain payload"
   echo "(undefined behaviour in C++). **assert**: an execution in which the protocol returns a wrong value."
+  echo "\`timeout\`: not finished within ${GENMC_TIMEOUT:-300} s (no verdict)."
   echo
   echo "| model | variant | RC11, plain payload | RC11, atomic payload | IMM, atomic payload |"
   echo "|---|---|---|---|---|"

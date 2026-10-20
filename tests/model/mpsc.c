@@ -43,13 +43,19 @@ data_t payload[CAP];
 static bool try_write(long value) {
   unsigned long h = atomic_load_explicit(&head_cache, ORD_MPSC_HEADCACHE_LOAD);
   unsigned long t = atomic_load_explicit(&tail, memory_order_relaxed);
-  do {
-    if (t - h >= CAP) {  /* the underflow-free form (LESSONS.md #6) */
-      h = atomic_load_explicit(&head, ORD_MPSC_RECLAIM);
-      if (t - h >= CAP) return false;
-      atomic_store_explicit(&head_cache, h, ORD_MPSC_HEADCACHE_STORE);
-    }
-  } while (!atomic_compare_exchange_weak_explicit(&tail, &t, t + 1, memory_order_release, memory_order_relaxed));
+  /* One attempt per call; callers assume() success. A strong CAS: GenMC
+   * explores spurious failures of a weak CAS, which would make the retry
+   * loop of the real code unbounded here. A failed CAS is then an
+   * execution that assume() discards, and no interleaving is lost, because
+   * the retry is the same as calling again. */
+  if (t - h >= CAP) {  /* the underflow-free form (LESSONS.md #6) */
+    h = atomic_load_explicit(&head, ORD_MPSC_RECLAIM);
+    if (t - h >= CAP) return false;
+    atomic_store_explicit(&head_cache, h, ORD_MPSC_HEADCACHE_STORE);
+  }
+  if (!atomic_compare_exchange_strong_explicit(&tail, &t, t + 1, memory_order_release, memory_order_relaxed)) {
+    return false;
+  }
   long expected = 0;
   if (!atomic_compare_exchange_strong_explicit(&header[t % CAP], &expected, CLAIMED, memory_order_release,
                                                memory_order_relaxed)) {
