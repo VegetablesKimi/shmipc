@@ -11,7 +11,7 @@ The interesting part is less the rings than the evidence that they are correct a
   - on four machines (two weakly ordered Arm cores, two TSO), stress tests catch up to 10 of the 12 on Arm (10 on the M4, 8 on Neoverse-N2) and none on TSO;
   - exhaustive model checking (GenMC, RC11 and IMM) catches all of them, including the five that no machine ever exposed.
 - **Crashes are part of the contract.** Processes are SIGKILLed 10,000 times per test run, including at fault-injection points inside the claim protocol. No committed record is lost or corrupted, and the consumer never stays stuck.
-- **Measured against rigtorp, moodycamel, Boost.Lockfree and a mutex.** The results include where shmipc loses, and why.
+- **Measured against Aeron IPC, rigtorp, moodycamel, Boost.Lockfree and a mutex.** The results include where shmipc loses, and why. For Aeron's 4× higher tail, three hypotheses were tested: two were rejected, and memory footprint was confirmed by a term-length sweep.
 - **Ten written-up lessons** ([LESSONS.md](docs/LESSONS.md)) of things that went wrong. Among them:
   - Docker's Linux VM on Apple silicon runs in hardware **TSO** mode, so it cannot test weak ordering;
   - `fork()` changes the hardware counter's frequency on macOS;
@@ -44,6 +44,7 @@ Apple M4. Linux VM pinned to two vCPUs, 64-byte messages. Directional only: see 
 |---|---:|---:|---:|
 | shmipc SPSC, **across processes** | 208 ns | 333 ns | 137 Mmsg/s |
 | pthread mutex ring, across processes | 1.25 µs | 3.6 µs | 17 Mmsg/s |
+| Aeron IPC, across processes (term 16 MB / 1 MB) | 249 / 291 ns | 1166 / 499 ns | 67 Mmsg/s |
 | rigtorp SPSCQueue (threads only) | 166 ns | 249 ns | 186–209 Mmsg/s |
 | moodycamel ReaderWriterQueue (threads only) | 249 ns | 458 ns | 118–128 Mmsg/s |
 
@@ -120,5 +121,4 @@ docs/                      DESIGN, CORRECTNESS, BENCHMARKS, LESSONS, raw results
 
 - **Topology-stratified latency on bare-metal x86** (SMT siblings, same L3, across CCX and socket), with `perf c2c`. The scripts are ready, but the machine is not.
 - **Explaining the rigtorp throughput gap.** It needs PMU counters (BENCHMARKS.md).
-- **A comparison with Aeron IPC.**
 - **One-SPSC-per-producer fan-in.** It is the answer to the MPSC contention numbers.

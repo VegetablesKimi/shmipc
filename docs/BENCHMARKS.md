@@ -1,11 +1,10 @@
 # Benchmarks
 
-Status: SPSC, MPSC, wait strategies and the race-safe copy measured on an Apple M4. Compared with rigtorp/SPSCQueue, moodycamel (ReaderWriterQueue, ConcurrentQueue), Boost.Lockfree and a pthread-mutex baseline.
+Status: SPSC, MPSC, wait strategies and the race-safe copy measured on an Apple M4. Compared with Aeron IPC, rigtorp/SPSCQueue, moodycamel (ReaderWriterQueue, ConcurrentQueue), Boost.Lockfree and a pthread-mutex baseline.
 
 - **Not yet measured:**
   - topology-stratified numbers (SMT siblings, same L3, across CCX, across socket);
-  - PMU-based analysis (`perf stat`, `perf c2c`);
-  - Aeron IPC.
+  - PMU-based analysis (`perf stat`, `perf c2c`).
 
   These need a bare-metal x86 server. The scripts and the result format are ready (`CPUS=a,b bench/scripts/run_all.sh`).
 
@@ -187,6 +186,69 @@ The three cached-index rings (shmipc, rigtorp, moodycamel) are within one or two
 Boost's `lockfree::queue` is a node-based Michael–Scott queue. It is slow even with one producer: every operation CASes shared pointers and touches a freelist.
 
 For latency-critical fan-in, the right shmipc design is one SPSC ring per producer, polled by the consumer. That is moodycamel's idea, and DESIGN.md §4d already suggests it.
+
+## Against Aeron IPC
+
+Aeron is the reference design for shared-memory IPC in trading systems (real-logic/aeron 1.53.3, C client and C media driver). Same machine and pinning as above; raw tables: [SPSC](results/m4-linux-docker-aeron.md), [MPSC](results/m4-linux-docker-aeron-mpsc.md).
+
+**Setup** (`bench/cases/aeron_transport.hpp`), following Aeron's low-latency guidance:
+- `aeron:ipc` with an exclusive publication for SPSC. The data path is a shared-memory log buffer between the two processes; the media driver only sets up the connection.
+- The driver runs as a separate process, with pre-touched, non-sparse buffers and `DEDICATED` threading. Its threads and the client conductor run on a housekeeping CPU, away from the two measured CPUs.
+- Clients are created after `fork()`, streams are fresh per run, and all connection setup happens before timing.
+- Build with `-DSHMIPC_BENCH_AERON=ON` (Aeron needs CMake ≥ 3.30, which the dev image provides).
+
+### Round trip, 64 B, across processes (ns)
+
+| | p50 | p99 | p99.9 | throughput |
+|---|---:|---:|---:|---:|
+| shmipc `SpscQueue` | 208 | 249 | 416 | 148 Mmsg/s |
+| Aeron, term length 16 MB | 249 | 1,166 | 2,999 | 67 Mmsg/s |
+| Aeron, term length 1 MB | 291 | 499 | 958–1,083 | — |
+
+At 1024 B the round trip is 541 vs 1,541 ns (p50). At 16 B throughput is 458 vs 81 Mmsg/s. In the open-loop one-way test both are at the counter's resolution at p50 and VM-noise-limited above.
+
+### Why Aeron's tail is higher: three hypotheses, two rejected
+
+The first runs showed Aeron with a steady p99 of about 1.1 µs at every size. Before reporting that, I tested what could be an artefact of the setup.
+
+1. **Background threads competing for the measured cores: rejected, twice.**
+   - The first version created the Aeron client *after* pinning the measured thread, so the client's conductor thread inherited that pin and shared the core. Moving the conductor to a housekeeping CPU left p99 at 1,124–1,166 ns.
+   - A run with **no client conductor thread at all** (`SHMIPC_AERON_INVOKER=1`: the client is driven by hand during setup only) gave p99 = 1,124 ns, identical.
+2. **Memory footprint: supported.** With the term length swept, everything else equal, p99 tracks it:
+
+   | term length | p50 | p99 | p99.9 |
+   |---:|---:|---:|---:|
+   | 16 MB | 291 | 1,124–1,166 | 2,875–4,835 |
+   | 1 MB | 291 | **499** | 958–1,083 |
+   | 256 KB | 291 | 583–749 | 1,374–1,833 |
+   | 64 KB | 249 | 666 | **≈ 900,000** |
+
+   - Aeron appends every message at a new address of a term buffer: 96-byte frames (32-byte header plus payload, aligned), streaming through the term and rotating to the next.
+   - A 64-byte message therefore enters a new 4 KB page about every 42 messages. In a VM each TLB miss is a two-level page walk.
+   - shmipc's ring of 1,024 slots (64 KB of data) stays resident in cache and TLB.
+   - Shrinking Aeron's term from 16 MB to 1 MB halves its p99.
+3. **Flow control at small terms: consistent with Aeron's design, not separately instrumented.**
+   - At 64 KB the p99.9 jumps to about 0.9 ms.
+   - The publisher may only write up to a limit that the media driver's conductor advances on each of its duty cycles. A small term means a small window (half a term, about 340 messages here), which this ping-pong exhausts faster than the conductor's millisecond-scale cycle refreshes it.
+
+Even at its best term length, Aeron's p99 is about twice shmipc's. The rest has not been broken down. It plausibly includes the 50% larger frames and the position counters Aeron maintains for flow control and monitoring.
+
+**In fairness to Aeron**, the design differences are deliberate:
+- its log buffers give *replay*, multiple subscribers, and the same API over UDP;
+- the term length is a tuning knob (its IPC default is larger than 16 MB, not smaller);
+- the driver gives a single place to monitor and tune.
+
+shmipc's SPSC is a narrower tool. What these numbers show is the cost of Aeron's generality on a latency-critical point-to-point path.
+
+### MPSC: Aeron's concurrent publication
+
+| producers | shmipc `Mpsc` | Aeron concurrent publication | moodycamel ConcurrentQueue |
+|---:|---:|---:|---:|
+| 1 | 33.6 | 14.7 | 30.1 |
+| 2 | 11.5 | 11.5 | 92.9 |
+| 3 | 10.8 | 14.2 | 62.4 |
+
+shmipc's `Mpsc` follows Aeron's log-buffer design (atomic tail, per-record publication), and the two scale the same way under contention. With one producer shmipc is about 2.3× faster, because it reuses one small ring where Aeron streams through its term.
 
 ## Limitations (read before quoting a number)
 

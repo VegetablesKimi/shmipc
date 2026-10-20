@@ -26,6 +26,7 @@
 #include <boost/lockfree/queue.hpp>
 #endif
 
+#include "cases/aeron_transport.hpp"
 #include "cases/cases.hpp"
 #include "harness/histogram.hpp"
 #include "shmipc/channel/channel.hpp"
@@ -220,7 +221,7 @@ int run_mpsc(const Options& opt) {
   }
   const CounterClock clk = CounterClock::calibrate();
   std::printf("64-byte payloads. Mmsg/s total (per producer).\n\n");
-  std::printf("| producers | shmipc Mpsc | moodycamel ConcurrentQueue | boost::lockfree::queue |\n|---:|---:|---:|---:|\n");
+  std::printf("| producers | shmipc Mpsc | moodycamel ConcurrentQueue | boost::lockfree::queue | Aeron IPC (concurrent publication) |\n|---:|---:|---:|---:|---:|\n");
   auto cell = [](double rate, int np) {
     char buf[64];
     std::snprintf(buf, sizeof(buf), "%.1f (%.1f)", rate / 1e6, rate / 1e6 / np);
@@ -275,7 +276,33 @@ int run_mpsc(const Options& opt) {
       bl = cell(r, np);
     }
 #endif
-    std::printf("| %d | %s | %s | %s |\n", np, cell(ours, np).c_str(), mc.c_str(), bl.c_str());
+    std::string ae = "n/a";
+#if defined(SHMIPC_HAVE_AERON)
+    {
+      // One concurrent publication shared by all producer threads: Aeron's
+      // log-buffer MPSC, the design shmipc's Mpsc follows.
+      aeron_ipc::Driver::ensure_started();
+      const std::int32_t stream = aeron_ipc::fresh_stream_id();
+      aeron_subscription_t* sub = aeron_ipc::add_subscription(stream);
+      aeron_publication_t* pub = aeron_ipc::add_publication(stream);
+      while (!aeron_subscription_is_connected(sub)) std::this_thread::yield();
+      const double r = time_mpsc(
+          np, per, cpus, clk,
+          [&](int) {
+            return [pub](std::uint64_t k) {
+              Payload64 v{k, {}};
+              return aeron_publication_offer(pub, reinterpret_cast<const std::uint8_t*>(&v), sizeof(v), nullptr,
+                                             nullptr) > 0;
+            };
+          },
+          [&] {
+            return static_cast<std::uint64_t>(aeron_subscription_poll(
+                sub, [](void*, const std::uint8_t*, std::size_t, aeron_header_t*) {}, nullptr, 64));
+          });
+      ae = cell(r, np);
+    }
+#endif
+    std::printf("| %d | %s | %s | %s | %s |\n", np, cell(ours, np).c_str(), mc.c_str(), bl.c_str(), ae.c_str());
     std::fflush(stdout);
   }
   return 0;

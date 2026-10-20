@@ -43,6 +43,30 @@ if(SHMIPC_BENCH_COMPETITORS)
   endif()
 endif()
 
+# Aeron (C client + C media driver), opt-in: it is a sizeable build.
+#   cmake --preset release -DSHMIPC_BENCH_AERON=ON
+option(SHMIPC_BENCH_AERON "Benchmark against Aeron IPC (builds Aeron from source)" OFF)
+if(SHMIPC_BENCH_AERON)
+  set(BUILD_AERON_DRIVER ON CACHE BOOL "" FORCE)
+  set(BUILD_AERON_ARCHIVE_API OFF CACHE BOOL "" FORCE)  # the only part that needs Java
+  set(AERON_TESTS OFF CACHE BOOL "" FORCE)
+  set(AERON_UNIT_TESTS OFF CACHE BOOL "" FORCE)
+  set(AERON_SYSTEM_TESTS OFF CACHE BOOL "" FORCE)
+  set(AERON_BUILD_SAMPLES OFF CACHE BOOL "" FORCE)
+  set(AERON_BUILD_DOCUMENTATION OFF CACHE BOOL "" FORCE)
+  set(AERON_INSTALL_TARGETS OFF CACHE BOOL "" FORCE)
+  FetchContent_Declare(aeron
+    URL https://github.com/real-logic/aeron/archive/refs/tags/1.53.3.tar.gz
+    URL_HASH SHA256=b7861c4aa9bd4918c0c3cb3b83b4a631cf48c1403e496008ccbcb950a121f125
+    DOWNLOAD_EXTRACT_TIMESTAMP ON)
+  FetchContent_MakeAvailable(aeron)
+  add_library(shmipc_aeron INTERFACE)
+  target_link_libraries(shmipc_aeron INTERFACE aeron_static)
+  target_include_directories(shmipc_aeron SYSTEM INTERFACE ${aeron_SOURCE_DIR}/aeron-client/src/main/c)
+  target_compile_definitions(shmipc_aeron INTERFACE SHMIPC_HAVE_AERON=1
+    SHMIPC_AERONMD_PATH="$<TARGET_FILE:aeronmd>")
+endif()
+
 add_library(shmipc_bench_harness
   harness/env.cpp
   harness/histogram.cpp
@@ -53,7 +77,11 @@ target_link_libraries(shmipc_bench_harness PUBLIC shmipc::shmipc hdr_histogram_s
 target_compile_options(shmipc_bench_harness PRIVATE -Wall -Wextra $<$<BOOL:${SHMIPC_WERROR}>:-Werror>)
 
 add_executable(shmipc_bench cases/spsc_bench.cpp cases/wait_bench.cpp)
-target_link_libraries(shmipc_bench PRIVATE shmipc_bench_harness $<TARGET_NAME_IF_EXISTS:shmipc_competitors>)
+target_link_libraries(shmipc_bench PRIVATE shmipc_bench_harness $<TARGET_NAME_IF_EXISTS:shmipc_competitors>
+  $<TARGET_NAME_IF_EXISTS:shmipc_aeron>)
+if(SHMIPC_BENCH_AERON)
+  add_dependencies(shmipc_bench aeronmd)  # launched by the benchmark (cases/aeron_transport.hpp)
+endif()
 target_compile_options(shmipc_bench PRIVATE -Wall -Wextra $<$<BOOL:${SHMIPC_WERROR}>:-Werror>)
 
 if(SHMIPC_BUILD_TESTS)

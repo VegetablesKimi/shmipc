@@ -133,3 +133,19 @@ shmipc's SPSC beat rigtorp by 3.5× at 16-byte messages and lost by 1.45× at 64
 **What I did instead.** BENCHMARKS.md records the result as measured but unexplained, together with the rejected hypothesis. Explaining it needs PMU counters, and the VM has none.
 
 **Takeaway.** A comparison table is only as good as the analysis next to it. A wrong but plausible explanation is worse than none.
+
+## 11. The variable that mattered was not the one I suspected (MS7, Aeron)
+
+**Symptom.** Aeron IPC showed a steady 1.1 µs p99 round trip against shmipc's 0.25 µs.
+
+**Hypothesis 1: the benchmark was unfair. It partly was.** The benchmark created Aeron's client after pinning the measured thread, so Aeron's conductor thread inherited the pin and shared the measured core. That was worth fixing. But fixing it changed nothing. Neither did running with no client thread at all (Aeron's conductor-invoker mode).
+
+**Hypothesis 2: memory footprint. This was it.** Sweeping Aeron's term length did move the number: 16 MB gives p99 1.1 µs, and 1 MB gives 0.5 µs. Aeron streams every message to a new address, while shmipc's ring stays in cache and TLB.
+
+**Shrinking further exposed a third mechanism.** At 64 KB the p99.9 jumped to 0.9 ms. This is consistent with flow control that the media driver's conductor advances only on its duty cycle.
+
+**Along the way:** `aeron_context_set_agent_on_start_function` is declared in Aeron 1.53.3's `aeronc.h` but not implemented (link error). Inherited thread affinity did the same job.
+
+**Takeaway.**
+- Before reporting "we are 4× better", try hard to make the other side better. Here that meant fixing the thread placement and sweeping its main tuning knob.
+- The fair comparison is the tuned one, with the knob's effect shown.

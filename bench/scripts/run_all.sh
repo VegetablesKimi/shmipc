@@ -8,6 +8,7 @@
 #   CPUS=a,b      the two CPUs to pin to (default 0,1); choose them to pick a
 #                 topology: SMT siblings, same L3, across CCX/socket
 #   QUICK=1       fewer sizes and iterations (smoke run / CI)
+#   TRANSPORTS=.. only these transports (default: shmipc, mutex and every competitor built in)
 #
 # Measurement hygiene is the caller's job, and is recorded in env.json
 # when visible: performance governor, turbo off, isolated cores, nothing
@@ -39,15 +40,18 @@ fi
 
 # Competitors this binary was built with (probe each with a 2-iteration run).
 competitors=()
-for c in rigtorp moodycamel boost; do
+for c in rigtorp moodycamel boost aeron; do
   "$bin" pingpong --transport="$c" --iters=2 --warmup=0 >/dev/null 2>&1 && competitors+=("$c")
 done
+# TRANSPORTS="shmipc aeron" restricts the matrix.
+read -r -a transports <<< "${TRANSPORTS:-shmipc mutex ${competitors[*]+"${competitors[*]}"}}"
 
 for bench in pingpong oneway throughput; do
-  for transport in shmipc mutex ${competitors[@]+"${competitors[@]}"}; do
+  for transport in "${transports[@]}"; do
     for mode in thread process; do
-      # Competitor queues live on the private heap: thread mode only.
-      if [[ "$mode" == process && "$transport" != shmipc && "$transport" != mutex ]]; then continue; fi
+      # Heap-allocated competitor queues are thread-mode only; shmipc, the
+      # mutex baseline and Aeron (shared-memory log buffers) also cross processes.
+      case "$transport" in shmipc | mutex | aeron) ;; *) [[ "$mode" == process ]] && continue ;; esac
       for size in "${sizes[@]}"; do
         name="$bench-$transport-$mode-$size"
         if [[ "$bench" == throughput ]]; then extra=("${tput_iters[@]+"${tput_iters[@]}"}"); else extra=("${lat_iters[@]+"${lat_iters[@]}"}"); fi

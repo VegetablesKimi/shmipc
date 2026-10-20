@@ -36,6 +36,7 @@
 #include <thread>
 #include <type_traits>
 
+#include "cases/aeron_transport.hpp"
 #include "cases/cases.hpp"
 #include "cases/transports.hpp"
 #include "shmipc/channel/atomic_copy.hpp"
@@ -150,6 +151,13 @@ struct Rig {
   typename Transport::State* b2a;
 };
 
+// Per-process setup a transport needs before the measured thread pins itself
+// (Aeron: create the client, whose conductor thread must not inherit the pin).
+template <class Transport>
+void prepare_process() {
+  if constexpr (requires { Transport::prepare_process(); }) Transport::prepare_process();
+}
+
 template <class T>
 void push(T& producer, const auto& m) {
   while (!producer.try_push(m)) {
@@ -166,6 +174,7 @@ template <class Transport, class M>
 void run_pingpong(const Params& p, const CounterClock& clk, Outcome& out) {
   Rig<Transport, M> rig(p);
   Peer echo(p.process, [&] {
+    prepare_process<Transport>();
     if (pin_this_thread(p.cpu_peer)) rig.control->peer_pinned = 1;
     typename Transport::Consumer in(*rig.a2b);
     typename Transport::Producer back(*rig.b2a);
@@ -177,6 +186,7 @@ void run_pingpong(const Params& p, const CounterClock& clk, Outcome& out) {
     }
   });
 
+  prepare_process<Transport>();
   out.pinned = pin_this_thread(p.cpu_main);
   typename Transport::Producer to(*rig.a2b);
   typename Transport::Consumer from(*rig.b2a);
@@ -204,6 +214,7 @@ void run_oneway(const Params& p, const CounterClock& clk, Outcome& out) {
   rig.control->start_tick = read_counter() + clk.frequency_hz() / 20;
 
   Peer sender(p.process, [&] {
+    prepare_process<Transport>();
     if (pin_this_thread(p.cpu_peer)) rig.control->peer_pinned = 1;
     typename Transport::Producer tx(*rig.a2b);
     const std::uint64_t start = rig.control->start_tick.load();
@@ -224,6 +235,7 @@ void run_oneway(const Params& p, const CounterClock& clk, Outcome& out) {
     rig.control->late_sends = late;
   });
 
+  prepare_process<Transport>();
   out.pinned = pin_this_thread(p.cpu_main);
   typename Transport::Consumer rx(*rig.a2b);
   M m{};
@@ -242,6 +254,7 @@ template <class Transport, class M>
 void run_throughput(const Params& p, const CounterClock& clk, Outcome& out) {
   Rig<Transport, M> rig(p);
   Peer producer(p.process, [&] {
+    prepare_process<Transport>();
     if (pin_this_thread(p.cpu_peer)) rig.control->peer_pinned = 1;
     typename Transport::Producer tx(*rig.a2b);
     M m{};
@@ -251,6 +264,7 @@ void run_throughput(const Params& p, const CounterClock& clk, Outcome& out) {
     }
   });
 
+  prepare_process<Transport>();
   out.pinned = pin_this_thread(p.cpu_main);
   typename Transport::Consumer rx(*rig.a2b);
   M m{};
@@ -294,6 +308,9 @@ bool dispatch_transport(const Params& p, const CounterClock& clk, Outcome& out) 
 #endif
 #if defined(SHMIPC_HAVE_BOOST_LOCKFREE)
   if (p.transport == "boost") return run_transport<BoostSpsc<M>, M>(p, clk, out);
+#endif
+#if defined(SHMIPC_HAVE_AERON)
+  if (p.transport == "aeron") return run_transport<aeron_ipc::AeronSpsc<M>, M>(p, clk, out);
 #endif
   return false;
 }
@@ -362,7 +379,7 @@ int run_copy(const Options& opt) {
 
 int usage(const std::string& err) {
   std::fprintf(stderr,
-               "error: %s\nusage: shmipc_bench copy [--iters=N] | pingpong|oneway|throughput --transport=shmipc|mutex|rigtorp|moodycamel|boost "
+               "error: %s\nusage: shmipc_bench copy [--iters=N] | pingpong|oneway|throughput --transport=shmipc|mutex|rigtorp|moodycamel|boost|aeron "
                "--mode=thread|process --size=16|64|256|1024 --cpus=A,B [--iters=N] [--warmup=N] "
                "[--rate=N] [--capacity=N] [--out=FILE]\n",
                err.c_str());
