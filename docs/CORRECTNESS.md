@@ -202,26 +202,28 @@ Raw output: [Neoverse-N2](results/weaken-gha-neoverse-n2.md), [EPYC](results/wea
    - **One weak machine is not enough evidence. Two different microarchitectures are better, and exhaustive model checking (MS6) is the real answer.**
 3. **Nobody caught the two load→store edges.** `spsc.release` and `spsc.reclaim` (load buffering) survived on all four machines. Both edges remain required by the C++ and Arm models, so they are the first targets for model checking.
 
-### MS4 sites: MPSC and the doorbell
+### MS4 sites: MPSC and the doorbell, on all four machines
 
-60 s per row. Raw output: [M4 native](results/weaken-m4-macos-native-ms4.md), [M4 TSO VM](results/weaken-m4-linux-docker-tso-ms4.md).
+60 s per row. Raw output: [M4 native](results/weaken-m4-macos-native-ms4.md), [Neoverse-N2](results/weaken-gha-neoverse-n2-ms4.md), [M4 TSO VM](results/weaken-m4-linux-docker-tso-ms4.md), [EPYC](results/weaken-gha-epyc-x86-ms4.md). The CI runners were the same models as in MS3, and their litmus checks again classified them as Arm (MP > 0) and TSO (MP = 0, SB > 0).
 
-| weakened site | ordering it provides | M4 native (Arm) | M4 TSO VM |
-|---|---|---|---|
-| control | — | — (15 runs) | n/a |
-| `mpsc.commit` | payload stores → length store | **1 s** | — (54) |
-| `mpsc.consume` | length load → payload loads | **<1 s** | not run |
-| `mpsc.release` | zeroing → head store | — (59) | not run |
-| `mpsc.reclaim` | head load → claim writes | — (58) | not run |
-| `mpsc.headcache` | head-cache hand-off between producers | — (57) | not run |
-| `doorbell.notify` | publish store → `waiters` load (**store→load**) | **3 s** | **5 s** |
-| `doorbell.wait` | `waiters` RMW → data load (**store→load**) | **4 s** | — (14) |
+| weakened site | ordering it provides | M4 native | Neoverse-N2 | M4 TSO VM | EPYC x86 |
+|---|---|---|---|---|---|
+| control | — | — (15) | — (13) | n/a | — (14) |
+| `mpsc.commit` | payload stores → length store | **1 s** | **<1 s** | — (54) | — (56) |
+| `mpsc.consume` | length load → payload loads | **<1 s** | **<1 s** | not run | — (56) |
+| `mpsc.release` | zeroing stores → head store (store→store)¹ | — (59) | — (66) | not run | — (56) |
+| `mpsc.reclaim` | head load → claim writes (load→store) | — (58) | — (64) | not run | — (56) |
+| `mpsc.headcache` | head-cache hand-off between producers | — (57) | — (68) | not run | — (56) |
+| `doorbell.notify` | publish store → `waiters` load (**store→load**) | **3 s** | **4 s** | **5 s** | **8 s** |
+| `doorbell.wait` | `waiters` RMW → data load (**store→load**) | **4 s** | **4 s** | — (14) | — (62) |
+
+¹ Unlike the other store→store edges, this one was not caught on Arm. Weakening it lets the new `head` become visible before the consumer's zeroing stores, so a producer could reuse the space and have its record erased by a late zero. But the space is reused only after the producers have gone a whole ring (4 KB here) further, and by then the zeroing stores have long since drained. The race window is real but practically unreachable at this ring size. A tiny ring would shrink the slack, and model checking does not depend on timing at all.
 
 **Three things stand out.**
 
-1. **The pattern from MS3 repeats for MPSC.** Store→store and load→load edges (`commit`, `consume`) are caught at once on Arm. Load→store edges (`release`, `reclaim`, `headcache`) are not; they wait for model checking.
-2. **`doorbell.notify` fails even under TSO.** It is the only site in the library whose weakening is visible on TSO, because it guards a store→load order, and TSO's store buffer reorders exactly that. A Dekker-style handshake written with acquire/release would pass every x86-hosted test that ignores store buffering, and still lose wakeups.
-3. **`doorbell.wait` survives TSO only by accident.** On the waiter side, the fence follows `waiters.fetch_add`. Under TSO (as on x86), every atomic read-modify-write is a full barrier (a `LOCK`-prefixed instruction), so the RMW happens to provide the order the deleted fence was meant to give. Arm's `LDADD` has no such side effect, and the M4 loses a wakeup within 4 s. C++ guarantees neither behaviour for a relaxed RMW, which is why the fence stays.
+1. **The pattern from MS3 repeats for MPSC, on both Arm cores.** Store→store and load→load edges (`commit`, `consume`) are caught at once. The space-reclamation edges (`release`, `reclaim`, `headcache`) are not: their failure needs either load buffering or a stale store surviving a full ring lap. They wait for model checking. Neither TSO machine catches anything here.
+2. **`doorbell.notify` fails on every machine, real x86 included.** It is the only site in the library whose weakening is visible on TSO. It guards a store→load order, and TSO's store buffer reorders exactly that. A Dekker-style handshake written with acquire/release would pass any test suite that never exercises the store buffer, and still lose wakeups in production, on x86 as much as on Arm.
+3. **`doorbell.wait` fails on both Arm cores and survives both TSO machines, and the reason is an accident.** On the waiter side the fence follows `waiters.fetch_add`. Under TSO (x86, and Apple's TSO mode) every atomic read-modify-write is a full barrier (`LOCK XADD`), so the RMW provides the order the deleted fence was meant to give. Arm's `LDADD` has no such side effect. C++ guarantees neither behaviour for a relaxed RMW, which is why the fence stays. Code tested only on x86 could depend on this accidental barrier without anyone knowing.
 
 ## 6. Limits of this evidence
 
